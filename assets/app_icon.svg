@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <radialGradient id="bg" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(512 512) rotate(90) scale(512)">
+      <stop offset="0" stop-color="#2B2B2B"/>
+      <stop offset="1" stop-color="#0E0E0E"/>
+    </radialGradient>
+    <radialGradient id="lens" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(512 512) rotate(90) scale(280)">
+      <stop offset="0" stop-color="#3A3A3A"/>
+      <stop offset="0.55" stop-color="#1C1C1C"/>
+      <stop offset="1" stop-color="#0B0B0B"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="220" y1="512" x2="804" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8A8A8A"/>
+      <stop offset="0.5" stop-color="#F0F0F0"/>
+      <stop offset="1" stop-color="#6F6F6F"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+
+  <!-- Outer ring -->
+  <circle cx="512" cy="512" r="320" fill="#111111"/>
+  <circle cx="512" cy="512" r="300" fill="none" stroke="url(#ring)" stroke-width="20"/>
+
+  <!-- Aperture blades -->
+  <g opacity="0.95">
+    <path d="M512 240c104 0 200 46 262 120c-56-12-114 8-156 50c-44 44-60 108-40 164c-84-10-160-54-202-118c-30-44-46-98-46-158c0-26 4-52 12-76c26-8 56-12 90-12z" fill="#1C1C1C"/>
+    <path d="M784 512c0 104-46 200-120 262c12-56-8-114-50-156c-44-44-108-60-164-40c10-84 54-160 118-202c44-30 98-46 158-46c26 0 52 4 76 12c8 26 12 56 12 90z" fill="#232323"/>
+    <path d="M512 784c-104 0-200-46-262-120c56 12 114-8 156-50c44-44 60-108 40-164c84 10 160 54 202 118c30 44 46 98 46 158c0 26-4 52-12 76c-26 8-56 12-90 12z" fill="#1A1A1A"/>
+    <path d="M240 512c0-104 46-200 120-262c-12 56 8 114 50 156c44 44 108 60 164 40c-10 84-54 160-118 202c-44 30-98 46-158 46c-26 0-52-4-76-12c-8-26-12-56-12-90z" fill="#202020"/>
+  </g>
+
+  <!-- Lens core -->
+  <circle cx="512" cy="512" r="180" fill="url(#lens)"/>
+  <circle cx="512" cy="512" r="86" fill="#0A0A0A"/>
+  <circle cx="512" cy="512" r="18" fill="#2A2A2A"/>
+
+  <!-- Red accent sweep -->
+  <path d="M690 360c-40-36-92-58-150-60" stroke="#D91515" stroke-width="22" stroke-linecap="round"/>
+  <path d="M744 612c-18 44-50 84-92 114" stroke="#D91515" stroke-width="22" stroke-linecap="round"/>
+</svg>
