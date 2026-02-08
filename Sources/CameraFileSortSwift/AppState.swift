@@ -15,8 +15,12 @@ final class AppState: ObservableObject {
     @Published var currentFileName: String = ""
     @Published var destinationValid: Bool = true
     @Published var lastScanSummary: String = "Not scanned"
+    @Published var processedCount: Int = 0
+    @Published var totalCount: Int = 0
 
     private static let settingsKey = "CameraFileSortSwift.Settings"
+    private static let defaultRootKey = "CameraFileSortSwift.DefaultRoot"
+    @Published var hasDefaultRoot: Bool = false
 
     init() {
         if let data = UserDefaults.standard.data(forKey: Self.settingsKey),
@@ -24,8 +28,27 @@ final class AppState: ObservableObject {
             settings = decoded
         } else {
             settings = .default
+            if let savedDefault = UserDefaults.standard.string(forKey: Self.defaultRootKey), !savedDefault.isEmpty {
+                settings.destinationRoot = savedDefault
+                hasDefaultRoot = true
+            } else if settings.destinationRoot.isEmpty {
+                settings.destinationRoot = (FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first?.path ?? "/Users/Shared")
+                    + "/Camera Imports"
+            }
         }
         refreshCards()
+    }
+
+    func setDefaultRoot() {
+        let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        UserDefaults.standard.set(trimmed, forKey: Self.defaultRootKey)
+        hasDefaultRoot = true
+    }
+
+    func clearDefaultRoot() {
+        UserDefaults.standard.removeObject(forKey: Self.defaultRootKey)
+        hasDefaultRoot = false
     }
 
     func saveSettings() {
@@ -36,6 +59,27 @@ final class AppState: ObservableObject {
 
     func resetDefaults() {
         settings = .default
+        saveSettings()
+    }
+
+    func resetDestinationDefaults() {
+        let def = AppSettings.default
+        settings.destinationRoot = def.destinationRoot
+        settings.importDateFormat = def.importDateFormat
+        settings.destinationMode = def.destinationMode
+        settings.sameFolderName = def.sameFolderName
+        settings.photoFolderName = def.photoFolderName
+        settings.videoFolderName = def.videoFolderName
+        settings.dateSource = def.dateSource
+        saveSettings()
+    }
+
+    func resetTransferDefaults() {
+        let def = AppSettings.default
+        settings.mediaSelection = def.mediaSelection
+        settings.action = def.action
+        settings.duplicatePolicy = def.duplicatePolicy
+        settings.ejectAfter = def.ejectAfter
         saveSettings()
     }
 
@@ -98,6 +142,8 @@ final class AppState: ObservableObject {
         cardProgress = 0
         currentCardName = ""
         currentFileName = ""
+        processedCount = 0
+        totalCount = 0
 
         DispatchQueue.global(qos: .userInitiated).async {
             let importer = Importer(settings: self.settings)
@@ -112,6 +158,7 @@ final class AppState: ObservableObject {
                     self.alert = AppAlert(title: "No media found", message: "No matching files were found on the selected cards.")
                     return
                 }
+                self.totalCount = totalFiles
                 if duplicateFound && self.settings.duplicatePolicy == .prompt {
                     self.alert = AppAlert(
                         title: "Duplicates detected",
@@ -147,6 +194,7 @@ final class AppState: ObservableObject {
                     self.currentFileName = update.currentFile
                     self.cardProgress = update.cardProgress
                     self.overallProgress = update.overallProgress
+                    self.processedCount = update.overallIndex
                 }
             }
 

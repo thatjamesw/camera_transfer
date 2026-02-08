@@ -91,7 +91,7 @@ struct AppSettings: Codable {
     var dateSource: DateSource
 
     static let `default` = AppSettings(
-        destinationRoot: "/Users/jameswright/Desktop/kuva/import/a1ii",
+        destinationRoot: "",
         importDateFormat: "MMddyyyy",
         action: .copy,
         photoExtensions: [".arw", ".jpg", ".jpeg", ".heif", ".hif", ".tif", ".tiff", ".png"],

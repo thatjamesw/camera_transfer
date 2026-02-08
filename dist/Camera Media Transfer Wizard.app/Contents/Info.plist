@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Sony Camera Media Transfer Wizard</string>
+  <string>Camera Media Transfer Wizard</string>
   <key>CFBundleDisplayName</key>
-  <string>Sony Camera Media Transfer Wizard</string>
+  <string>Camera Media Transfer Wizard</string>
   <key>CFBundleIdentifier</key>
   <string>com.jameswright.camerafilesort</string>
   <key>CFBundleVersion</key>
@@ -15,7 +15,7 @@
   <key>CFBundleExecutable</key>
   <string>CameraFileSortSwift</string>
   <key>CFBundleIconFile</key>
-  <string>SonyFileTransfer</string>
+  <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>

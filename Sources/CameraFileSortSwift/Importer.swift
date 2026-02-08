@@ -103,7 +103,8 @@ struct Importer {
                         currentCard: cardName,
                         currentFile: file.lastPathComponent,
                         cardProgress: progressValue(index: cardIndexCount, total: cardTotal),
-                        overallProgress: progressValue(index: overallIndex, total: totalFiles)
+                        overallProgress: progressValue(index: overallIndex, total: totalFiles),
+                        overallIndex: overallIndex
                     ))
                 }
             }
@@ -116,7 +117,8 @@ struct Importer {
                         currentCard: cardName,
                         currentFile: file.lastPathComponent,
                         cardProgress: progressValue(index: cardIndexCount, total: cardTotal),
-                        overallProgress: progressValue(index: overallIndex, total: totalFiles)
+                        overallProgress: progressValue(index: overallIndex, total: totalFiles),
+                        overallIndex: overallIndex
                     ))
                 }
             }
@@ -329,6 +331,7 @@ struct ProgressUpdate {
     let currentFile: String
     let cardProgress: Double
     let overallProgress: Double
+    let overallIndex: Int
 }
 
 enum MediaType: String {

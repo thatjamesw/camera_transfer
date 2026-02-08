@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="Sony Camera Media Transfer Wizard"
+APP_NAME="Camera Media Transfer Wizard"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/.build/release"
 APP_DIR="$ROOT_DIR/dist/${APP_NAME}.app"
-ICON_PATH="$ROOT_DIR/assets/SonyFileTransfer.icns"
-ICON_NAME="SonyFileTransfer"
+ICON_PATH="$ROOT_DIR/assets/AppIcon.icns"
+ICON_NAME="AppIcon"
 
 cd "$ROOT_DIR"
 
-# If a custom icns exists, use it directly.
+if [[ -x "$ROOT_DIR/scripts/build_icon.sh" ]]; then
+  "$ROOT_DIR/scripts/build_icon.sh" >/dev/null 2>&1 || true
+fi
 
 swift build -c release
 

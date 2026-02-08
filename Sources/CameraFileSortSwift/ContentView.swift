@@ -3,6 +3,14 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @State private var datePatternDraft: String = ""
+    
+    private func sanitizeDatePattern(_ input: String) -> String {
+        let allowed = Set("dmyDMY-_")
+        let filtered = input.filter { allowed.contains($0) }
+        return filtered.replacingOccurrences(of: "m", with: "M")
+            .replacingOccurrences(of: "d", with: "d")
+            .replacingOccurrences(of: "y", with: "y")
+    }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -71,13 +79,10 @@ struct ContentView: View {
 private extension ContentView {
     var headerView: some View {
         HStack {
-            Text("Sony Camera Media Transfer Wizard")
+            Text("Camera Media Transfer Wizard")
                 .font(.title)
                 .fontWeight(.semibold)
             Spacer()
-            Button("Use Defaults") {
-                appState.resetDefaults()
-            }
         }
     }
 
@@ -113,28 +118,36 @@ private extension ContentView {
 
     var settingsView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            GroupBox(label: Text("Destination")) {
+            GroupBox(label: HStack {
+                Text("Destination")
+                Spacer()
+                Button("Reset to Default") { appState.resetDestinationDefaults() }
+            }) {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Root")
+                        Text("Target Destination")
                             .frame(width: 110, alignment: .leading)
                         TextField("Destination root", text: $appState.settings.destinationRoot)
                         Button("Choose…") { appState.chooseDestination() }
+                        Button(appState.hasDefaultRoot ? "Default set" : "Set default") {
+                            appState.setDefaultRoot()
+                        }
+                        .disabled(appState.hasDefaultRoot)
                     }
                     .onChange(of: appState.settings.destinationRoot) { _ in
                         _ = appState.validateDestination()
                     }
-                    HStack {
-                        Text("Status")
-                            .frame(width: 110, alignment: .leading)
-                        Text(appState.destinationValid ? "OK" : "Invalid path")
-                            .foregroundColor(appState.destinationValid ? .secondary : .red)
-                    }
+                HStack {
+                    Text("Status")
+                        .frame(width: 110, alignment: .leading)
+                    Text(appState.destinationValid ? "OK" : "Invalid path")
+                        .foregroundColor(appState.destinationValid ? .secondary : .red)
+                }
 
                 HStack {
                     Text("Location")
                         .frame(width: 110, alignment: .leading)
-                    Picker("Location", selection: $appState.settings.destinationMode) {
+                    Picker("", selection: $appState.settings.destinationMode) {
                         ForEach(DestinationMode.allCases) { mode in
                             Text(mode.displayName).tag(mode)
                         }
@@ -145,7 +158,7 @@ private extension ContentView {
                 HStack {
                     Text("Date source")
                         .frame(width: 110, alignment: .leading)
-                    Picker("Date source", selection: $appState.settings.dateSource) {
+                    Picker("", selection: $appState.settings.dateSource) {
                         ForEach(DateSource.allCases) { source in
                             Text(source.displayName).tag(source)
                         }
@@ -158,7 +171,11 @@ private extension ContentView {
                             .frame(width: 110, alignment: .leading)
                         TextField("MMddyyyy", text: $datePatternDraft)
                             .onChange(of: datePatternDraft) { newValue in
-                                appState.settings.importDateFormat = newValue
+                                let cleaned = sanitizeDatePattern(newValue)
+                                if cleaned != datePatternDraft {
+                                    datePatternDraft = cleaned
+                                }
+                                appState.settings.importDateFormat = cleaned
                             }
                     }
                 }
@@ -192,12 +209,16 @@ private extension ContentView {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            GroupBox(label: Text("Transfer")) {
+            GroupBox(label: HStack {
+                Text("Transfer")
+                Spacer()
+                Button("Reset to Default") { appState.resetTransferDefaults() }
+            }) {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Text("Media")
                             .frame(width: 110, alignment: .leading)
-                        Picker("Media", selection: $appState.settings.mediaSelection) {
+                        Picker("", selection: $appState.settings.mediaSelection) {
                             ForEach(MediaSelection.allCases) { selection in
                                 Text(selection.displayName).tag(selection)
                             }
@@ -208,7 +229,7 @@ private extension ContentView {
                     HStack {
                         Text("Action")
                             .frame(width: 110, alignment: .leading)
-                        Picker("Action", selection: $appState.settings.action) {
+                        Picker("", selection: $appState.settings.action) {
                             ForEach(TransferAction.allCases) { action in
                                 Text(action.rawValue.capitalized).tag(action)
                             }
@@ -219,7 +240,7 @@ private extension ContentView {
                     HStack {
                         Text("Duplicates")
                             .frame(width: 110, alignment: .leading)
-                        Picker("Duplicates", selection: $appState.settings.duplicatePolicy) {
+                        Picker("", selection: $appState.settings.duplicatePolicy) {
                             ForEach(DuplicatePolicy.allCases) { policy in
                                 Text(policy.displayName).tag(policy)
                             }
@@ -239,7 +260,7 @@ private extension ContentView {
 
     var actionRow: some View {
         HStack {
-            Text(appState.statusMessage)
+            Text(appState.isImporting ? "Importing \(appState.processedCount)/\(appState.totalCount)" : appState.statusMessage)
                 .foregroundStyle(.secondary)
             Spacer()
             Button(appState.isImporting ? "Importing..." : "Import") {

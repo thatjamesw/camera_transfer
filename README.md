@@ -1,11 +1,11 @@
-# Camera File Sort (SwiftUI)
+# Camera Media Transfer Wizard (SwiftUI)
 
 Native macOS SwiftUI app that imports Sony A1II cards into date-based folders.
 
 ## Features
 
 - Detects mounted cards in `/Volumes` (looks for `DCIM` or `PRIVATE`).
-- Imports to `/Users/jameswright/Desktop/kuva/import/a1ii/<folder>/<DATE>` (configurable).
+- Imports to `~/Pictures/Camera Imports/<folder>/<DATE>` by default (configurable).
 - Duplicate handling: prompt, skip, keep both, overwrite.
 - Destination path picker.
 - Per-card and overall progress.
