@@ -53,3 +53,10 @@ fi
 
 echo "Built app bundle:"
 echo "  $APP_DIR"
+
+ZIP_PATH="$ROOT_DIR/dist/${APP_NAME}.zip"
+rm -f "$ZIP_PATH"
+cd "$ROOT_DIR/dist"
+zip -r "${APP_NAME}.zip" "${APP_NAME}.app" >/dev/null
+echo "Built zip:"
+echo "  $ZIP_PATH"
