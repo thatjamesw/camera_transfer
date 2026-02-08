@@ -26,7 +26,7 @@ Open the Swift package in Xcode:
 You can also run from the command line:
 
 ```bash
-cd /Users/jameswright/dev/_mvp/camera_file_sort/camera_transfer
+cd camera_transfer
 swift run
 ```
 
@@ -37,16 +37,16 @@ Note: For the SwiftUI app UI, Xcode is recommended.
 This builds a macOS `.app` bundle from the SwiftPM release binary and zips it.
 
 ```bash
-/Users/jameswright/dev/_mvp/camera_file_sort/camera_transfer/scripts/build_app_bundle.sh
+./scripts/build_app_bundle.sh
 ```
 
 The resulting app is:
 
-`/Users/jameswright/dev/_mvp/camera_file_sort/camera_transfer/dist/Camera Media Transfer Wizard.app`
+`dist/Camera Media Transfer Wizard.app`
 
 The zip is:
 
-`/Users/jameswright/dev/_mvp/camera_file_sort/camera_transfer/dist/Camera Media Transfer Wizard.zip`
+`dist/Camera Media Transfer Wizard.zip`
 
 ## Settings
 
