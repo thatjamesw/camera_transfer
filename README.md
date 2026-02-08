@@ -8,9 +8,11 @@ Native macOS SwiftUI app that imports Sony A1II cards into date-based folders.
 - Imports to `~/Pictures/Camera Imports/<folder>/<DATE>` by default (configurable).
 - Duplicate handling: prompt, skip, keep both, overwrite.
 - Destination path picker.
-- Per-card and overall progress.
+- Per-card and overall progress (with x/total count).
 - Media selection (photo, video, photo+video).
 - Destination mode (separate, same, or custom folder names) plus custom folder names.
+- Date source selection (Import date / File date / None).
+- Saved default destination location.
 - Optional auto-eject, including Sony `PMHOME`.
 
 ## Build & Run
@@ -24,7 +26,7 @@ Open the Swift package in Xcode:
 You can also run from the command line:
 
 ```bash
-cd /Users/jameswright/dev/_mvp/camera_file_sort/swift_app
+cd /Users/jameswright/dev/_mvp/camera_file_sort/camera_transfer
 swift run
 ```
 
@@ -32,15 +34,19 @@ Note: For the SwiftUI app UI, Xcode is recommended.
 
 ## Standalone .app (no Xcode project required)
 
-This builds a macOS `.app` bundle from the SwiftPM release binary.
+This builds a macOS `.app` bundle from the SwiftPM release binary and zips it.
 
 ```bash
-/Users/jameswright/dev/_mvp/camera_file_sort/swift_app/scripts/build_app_bundle.sh
+/Users/jameswright/dev/_mvp/camera_file_sort/camera_transfer/scripts/build_app_bundle.sh
 ```
 
 The resulting app is:
 
-`/Users/jameswright/dev/_mvp/camera_file_sort/swift_app/dist/Sony Camera Media Transfer Wizard.app`
+`/Users/jameswright/dev/_mvp/camera_file_sort/camera_transfer/dist/Camera Media Transfer Wizard.app`
+
+The zip is:
+
+`/Users/jameswright/dev/_mvp/camera_file_sort/camera_transfer/dist/Camera Media Transfer Wizard.zip`
 
 ## Settings
 
@@ -48,7 +54,7 @@ Settings are stored in `UserDefaults` under the key `CameraFileSortSwift.Setting
 
 ## Defaults
 
-- Destination: `/Users/jameswright/Desktop/kuva/import/a1ii`
+- Destination: `~/Pictures/Camera Imports`
 - Date format: `MMddyyyy` (e.g. 03022026)
 - Action: copy
 - Duplicates: prompt
@@ -56,5 +62,4 @@ Settings are stored in `UserDefaults` under the key `CameraFileSortSwift.Setting
 
 ## Next steps
 
-- Add delete confirmation for cards list and presets if reintroduced.
-- Add full path preview for photo/video/audio destination folders.
+- Add delete confirmation for cards list if needed.
