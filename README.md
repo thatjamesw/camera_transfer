@@ -20,7 +20,7 @@ Native macOS SwiftUI app that imports Sony A1II cards into date-based folders.
 Open the Swift package in Xcode:
 
 1. Open Xcode.
-2. File > Open… and select the `swift_app` folder.
+2. File > Open… and select the `camera_transfer` folder.
 3. Select the `CameraFileSortSwift` scheme and run.
 
 You can also run from the command line:
@@ -47,6 +47,15 @@ The resulting app is:
 The zip is:
 
 `dist/Camera Media Transfer Wizard.zip`
+
+## Distribution Notes
+
+If you share the zip with other Macs, Gatekeeper may block it unless it’s signed + notarized.
+As a workaround for trusted users, they can remove the quarantine attribute:
+
+```bash
+xattr -rd com.apple.quarantine "/path/to/Camera Media Transfer Wizard.app"
+```
 
 ## Settings
 

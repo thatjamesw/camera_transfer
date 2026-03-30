@@ -51,12 +51,13 @@ struct Importer {
     let settings: AppSettings
 
     func scanSources(_ sources: [URL]) -> [SourceScan] {
+        let knownSignatures = loadManifest()
         var scans: [SourceScan] = []
         for source in sources {
             let photoFiles = shouldInclude(.photo) ? gatherFiles(in: source, extensions: settings.photoExtensions) : []
             let videoFiles = shouldInclude(.video) ? gatherFiles(in: source, extensions: settings.videoExtensions) : []
-            let photoHasDup = shouldInclude(.photo) && hasDuplicatesForFiles(files: photoFiles, type: .photo)
-            let videoHasDup = shouldInclude(.video) && hasDuplicatesForFiles(files: videoFiles, type: .video)
+            let photoHasDup = shouldInclude(.photo) && hasDuplicatesForFiles(files: photoFiles, type: .photo, knownSignatures: knownSignatures)
+            let videoHasDup = shouldInclude(.video) && hasDuplicatesForFiles(files: videoFiles, type: .video, knownSignatures: knownSignatures)
             scans.append(
                 SourceScan(
                     source: source,
@@ -75,6 +76,7 @@ struct Importer {
         onProgress: ((ProgressUpdate) -> Void)? = nil
     ) -> TransferResult {
         var result = TransferResult()
+        var knownSignatures = loadManifest()
         let totalPhoto = scans.reduce(0) { $0 + $1.photoFiles.count }
         let totalVideo = scans.reduce(0) { $0 + $1.videoFiles.count }
         let totalFiles = totalPhoto + totalVideo
@@ -96,7 +98,7 @@ struct Importer {
             var photoResult = TransferResult()
             var videoResult = TransferResult()
             if shouldInclude(.photo) {
-                photoResult = transfer(files: scan.photoFiles, to: photoDir, type: .photo) { file in
+                photoResult = transfer(files: scan.photoFiles, to: photoDir, type: .photo, knownSignatures: &knownSignatures) { file in
                     overallIndex += 1
                     cardIndexCount += 1
                     onProgress?(ProgressUpdate(
@@ -110,7 +112,7 @@ struct Importer {
             }
 
             if shouldInclude(.video) {
-                videoResult = transfer(files: scan.videoFiles, to: videoDir, type: .video) { file in
+                videoResult = transfer(files: scan.videoFiles, to: videoDir, type: .video, knownSignatures: &knownSignatures) { file in
                     overallIndex += 1
                     cardIndexCount += 1
                     onProgress?(ProgressUpdate(
@@ -127,6 +129,10 @@ struct Importer {
             result.skipped += photoResult.skipped + videoResult.skipped
             result.duplicates += photoResult.duplicates + videoResult.duplicates
 
+        }
+
+        if result.copied > 0 {
+            saveManifest(knownSignatures)
         }
 
         if settings.ejectAfter {
@@ -154,25 +160,36 @@ struct Importer {
         return files
     }
 
-    private func hasDuplicatesForFiles(files: [URL], type: MediaType) -> Bool {
+    private func hasDuplicatesForFiles(files: [URL], type: MediaType, knownSignatures: Set<String>) -> Bool {
         for file in files {
             let destDir = destinationDir(type: type, fileURL: file)
             let target = destDir.appendingPathComponent(file.lastPathComponent)
             if FileManager.default.fileExists(atPath: target.path) {
                 return true
             }
+            if let signature = fileSignature(for: file), knownSignatures.contains(signature) {
+                return true
+            }
         }
         return false
     }
 
-    private func transfer(files: [URL], to destDir: URL, type: MediaType, onFile: ((URL) -> Void)? = nil) -> TransferResult {
+    private func transfer(
+        files: [URL],
+        to destDir: URL,
+        type: MediaType,
+        knownSignatures: inout Set<String>,
+        onFile: ((URL) -> Void)? = nil
+    ) -> TransferResult {
         var result = TransferResult()
         for file in files {
             let actualDestDir = destinationDir(type: type, fileURL: file, fallback: destDir)
             createDirectory(actualDestDir)
             let target = actualDestDir.appendingPathComponent(file.lastPathComponent)
+            let signature = fileSignature(for: file)
+            let hasPotentialDuplicate = signature.map { knownSignatures.contains($0) } ?? false
 
-            if FileManager.default.fileExists(atPath: target.path) {
+            if FileManager.default.fileExists(atPath: target.path) || hasPotentialDuplicate {
                 result.duplicates += 1
                 switch settings.duplicatePolicy {
                 case .skip:
@@ -180,22 +197,30 @@ struct Importer {
                     continue
                 case .keepBoth:
                     let unique = uniqueDestination(for: target)
-                    moveOrCopy(file, to: unique, result: &result)
+                    moveOrCopy(file, to: unique, result: &result, signature: signature, knownSignatures: &knownSignatures)
                 case .overwrite:
-                    try? FileManager.default.removeItem(at: target)
-                    moveOrCopy(file, to: target, result: &result)
+                    if FileManager.default.fileExists(atPath: target.path) {
+                        try? FileManager.default.removeItem(at: target)
+                    }
+                    moveOrCopy(file, to: target, result: &result, signature: signature, knownSignatures: &knownSignatures)
                 case .prompt:
                     result.skipped += 1
                 }
             } else {
-                moveOrCopy(file, to: target, result: &result)
+                moveOrCopy(file, to: target, result: &result, signature: signature, knownSignatures: &knownSignatures)
             }
             onFile?(file)
         }
         return result
     }
 
-    private func moveOrCopy(_ file: URL, to target: URL, result: inout TransferResult) {
+    private func moveOrCopy(
+        _ file: URL,
+        to target: URL,
+        result: inout TransferResult,
+        signature: String?,
+        knownSignatures: inout Set<String>
+    ) {
         do {
             if settings.action == .move {
                 try FileManager.default.moveItem(at: file, to: target)
@@ -203,9 +228,54 @@ struct Importer {
                 try FileManager.default.copyItem(at: file, to: target)
             }
             result.copied += 1
+            if let signature {
+                knownSignatures.insert(signature)
+            }
         } catch {
             result.skipped += 1
         }
+    }
+
+    private func fileSignature(for file: URL) -> String? {
+        let keys: Set<URLResourceKey> = [
+            .fileSizeKey,
+            .creationDateKey,
+            .contentModificationDateKey
+        ]
+        guard let values = try? file.resourceValues(forKeys: keys) else {
+            return nil
+        }
+        guard let size = values.fileSize else {
+            return nil
+        }
+        let timestamp = values.creationDate ?? values.contentModificationDate ?? Date.distantPast
+        let epoch = Int64(timestamp.timeIntervalSince1970)
+        return "\(file.lastPathComponent.lowercased())|\(size)|\(epoch)"
+    }
+
+    private func loadManifest() -> Set<String> {
+        let url = manifestURL()
+        guard let data = try? Data(contentsOf: url) else {
+            return []
+        }
+        if let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            return Set(decoded)
+        }
+        return []
+    }
+
+    private func saveManifest(_ signatures: Set<String>) {
+        let url = manifestURL()
+        createDirectory(url.deletingLastPathComponent())
+        let sorted = signatures.sorted()
+        if let data = try? JSONEncoder().encode(sorted) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private func manifestURL() -> URL {
+        URL(fileURLWithPath: settings.destinationRoot)
+            .appendingPathComponent(".camera_transfer_manifest.json")
     }
 
     private func uniqueDestination(for target: URL) -> URL {

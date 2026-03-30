@@ -17,6 +17,7 @@ final class AppState: ObservableObject {
     @Published var lastScanSummary: String = "Not scanned"
     @Published var processedCount: Int = 0
     @Published var totalCount: Int = 0
+    @Published var canOpenDestination: Bool = false
 
     private static let settingsKey = "CameraFileSortSwift.Settings"
     private static let defaultRootKey = "CameraFileSortSwift.DefaultRoot"
@@ -137,6 +138,7 @@ final class AppState: ObservableObject {
         }
 
         isImporting = true
+        canOpenDestination = false
         statusMessage = "Scanning files..."
         overallProgress = 0
         cardProgress = 0
@@ -154,6 +156,7 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async {
                 if totalFiles == 0 {
                     self.isImporting = false
+                    self.canOpenDestination = false
                     self.statusMessage = "No media found."
                     self.alert = AppAlert(title: "No media found", message: "No matching files were found on the selected cards.")
                     return
@@ -200,6 +203,7 @@ final class AppState: ObservableObject {
 
             DispatchQueue.main.async {
                 self.isImporting = false
+                self.canOpenDestination = true
                 self.statusMessage = "Done. Copied \(result.copied), skipped \(result.skipped)."
                 self.alert = AppAlert(
                     title: "Import complete",
@@ -243,6 +247,13 @@ final class AppState: ObservableObject {
                 : settings.videoFolderName
             return "\(root)/\(photoFolder)\(dateSuffix)  and  \(root)/\(videoFolder)\(dateSuffix)"
         }
+    }
+
+    func openDestination() {
+        let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let url = URL(fileURLWithPath: trimmed)
+        NSWorkspace.shared.open(url)
     }
 
     private func normalizedDatePattern(_ pattern: String) -> String {

@@ -263,6 +263,10 @@ private extension ContentView {
             Text(appState.isImporting ? "Importing \(appState.processedCount)/\(appState.totalCount)" : appState.statusMessage)
                 .foregroundStyle(.secondary)
             Spacer()
+            Button("Open Destination") {
+                appState.openDestination()
+            }
+            .disabled(!appState.canOpenDestination || appState.isImporting)
             Button(appState.isImporting ? "Importing..." : "Import") {
                 appState.saveSettings()
                 appState.startImport()
