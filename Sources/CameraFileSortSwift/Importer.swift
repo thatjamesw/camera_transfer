@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 struct CameraScanner {
@@ -47,27 +48,46 @@ struct CameraScanner {
     }
 }
 
+private final class Locked<Value> {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func withLock<T>(_ body: (inout Value) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&value)
+    }
+}
+
 struct Importer {
     let settings: AppSettings
 
     func scanSources(_ sources: [URL]) -> [SourceScan] {
         let knownSignatures = loadManifest()
-        var scans: [SourceScan] = []
-        for source in sources {
+        let scanCount = sources.count
+        guard scanCount > 0 else { return [] }
+
+        let results = Array(repeating: Locked<SourceScan?>(nil), count: scanCount)
+        DispatchQueue.concurrentPerform(iterations: scanCount) { index in
+            let source = sources[index]
             let photoFiles = shouldInclude(.photo) ? gatherFiles(in: source, extensions: settings.photoExtensions) : []
             let videoFiles = shouldInclude(.video) ? gatherFiles(in: source, extensions: settings.videoExtensions) : []
             let photoHasDup = shouldInclude(.photo) && hasDuplicatesForFiles(files: photoFiles, type: .photo, knownSignatures: knownSignatures)
             let videoHasDup = shouldInclude(.video) && hasDuplicatesForFiles(files: videoFiles, type: .video, knownSignatures: knownSignatures)
-            scans.append(
-                SourceScan(
-                    source: source,
-                    photoFiles: photoFiles,
-                    videoFiles: videoFiles,
-                    hasDuplicates: photoHasDup || videoHasDup
-                )
+            let scan = SourceScan(
+                source: source,
+                photoFiles: photoFiles,
+                videoFiles: videoFiles,
+                hasDuplicates: photoHasDup || videoHasDup
             )
+            results[index].withLock { $0 = scan }
         }
-        return scans
+
+        return results.compactMap { $0.withLock { $0 } }
     }
 
     func runImport(
@@ -76,7 +96,6 @@ struct Importer {
         onProgress: ((ProgressUpdate) -> Void)? = nil
     ) -> TransferResult {
         var result = TransferResult()
-        var knownSignatures = loadManifest()
         let totalPhoto = scans.reduce(0) { $0 + $1.photoFiles.count }
         let totalVideo = scans.reduce(0) { $0 + $1.videoFiles.count }
         let totalFiles = totalPhoto + totalVideo
@@ -88,58 +107,38 @@ struct Importer {
         let videoDir = destinationDir(type: .video)
         if totalPhoto > 0 { createDirectory(photoDir) }
         if totalVideo > 0 { createDirectory(videoDir) }
-        var overallIndex = 0
+        let importState = ImportState(
+            knownSignatures: loadManifest(),
+            maxConcurrentTransfers: recommendedTransferConcurrency()
+        )
 
         for scan in scans {
-            let cardTotal = scan.photoFiles.count + scan.videoFiles.count
-            var cardIndexCount = 0
+            let cardFiles = buildTransferEntries(for: scan, photoDir: photoDir, videoDir: videoDir)
             let cardName = scan.source.lastPathComponent
-
-            var photoResult = TransferResult()
-            var videoResult = TransferResult()
-            if shouldInclude(.photo) {
-                photoResult = transfer(files: scan.photoFiles, to: photoDir, type: .photo, knownSignatures: &knownSignatures) { file in
-                    overallIndex += 1
-                    cardIndexCount += 1
-                    onProgress?(ProgressUpdate(
-                        currentCard: cardName,
-                        currentFile: file.lastPathComponent,
-                        cardProgress: progressValue(index: cardIndexCount, total: cardTotal),
-                        overallProgress: progressValue(index: overallIndex, total: totalFiles),
-                        overallIndex: overallIndex
-                    ))
-                }
-            }
-
-            if shouldInclude(.video) {
-                videoResult = transfer(files: scan.videoFiles, to: videoDir, type: .video, knownSignatures: &knownSignatures) { file in
-                    overallIndex += 1
-                    cardIndexCount += 1
-                    onProgress?(ProgressUpdate(
-                        currentCard: cardName,
-                        currentFile: file.lastPathComponent,
-                        cardProgress: progressValue(index: cardIndexCount, total: cardTotal),
-                        overallProgress: progressValue(index: overallIndex, total: totalFiles),
-                        overallIndex: overallIndex
-                    ))
-                }
-            }
-
-            result.copied += photoResult.copied + videoResult.copied
-            result.skipped += photoResult.skipped + videoResult.skipped
-            result.duplicates += photoResult.duplicates + videoResult.duplicates
-
+            processEntries(
+                cardFiles,
+                cardName: cardName,
+                totalFiles: totalFiles,
+                state: importState,
+                onProgress: onProgress
+            )
         }
 
+        result = importState.snapshotResult()
+
         if result.copied > 0 {
-            saveManifest(knownSignatures)
+            saveManifest(importState.snapshotKnownSignatures())
         }
 
         if settings.ejectAfter {
+            var seenVolumePaths = Set<String>()
             for scan in scans {
-                eject(volume: scan.source)
+                guard let volume = mountedVolumeRoot(for: scan.source) else { continue }
+                guard seenVolumePaths.insert(volume.path).inserted else { continue }
+                if let failure = eject(volume: volume) {
+                    result.ejectFailures.append("\(volume.lastPathComponent): \(failure)")
+                }
             }
-            eject(volume: URL(fileURLWithPath: "/Volumes/PMHOME"))
         }
 
         return result
@@ -174,65 +173,77 @@ struct Importer {
         return false
     }
 
-    private func transfer(
-        files: [URL],
-        to destDir: URL,
-        type: MediaType,
-        knownSignatures: inout Set<String>,
-        onFile: ((URL) -> Void)? = nil
-    ) -> TransferResult {
-        var result = TransferResult()
-        for file in files {
-            let actualDestDir = destinationDir(type: type, fileURL: file, fallback: destDir)
-            createDirectory(actualDestDir)
-            let target = actualDestDir.appendingPathComponent(file.lastPathComponent)
-            let signature = fileSignature(for: file)
-            let hasPotentialDuplicate = signature.map { knownSignatures.contains($0) } ?? false
-
-            if FileManager.default.fileExists(atPath: target.path) || hasPotentialDuplicate {
-                result.duplicates += 1
-                switch settings.duplicatePolicy {
-                case .skip:
-                    result.skipped += 1
-                    continue
-                case .keepBoth:
-                    let unique = uniqueDestination(for: target)
-                    moveOrCopy(file, to: unique, result: &result, signature: signature, knownSignatures: &knownSignatures)
-                case .overwrite:
-                    if FileManager.default.fileExists(atPath: target.path) {
-                        try? FileManager.default.removeItem(at: target)
-                    }
-                    moveOrCopy(file, to: target, result: &result, signature: signature, knownSignatures: &knownSignatures)
-                case .prompt:
-                    result.skipped += 1
-                }
-            } else {
-                moveOrCopy(file, to: target, result: &result, signature: signature, knownSignatures: &knownSignatures)
-            }
-            onFile?(file)
+    private func buildTransferEntries(for scan: SourceScan, photoDir: URL, videoDir: URL) -> [TransferEntry] {
+        var entries: [TransferEntry] = []
+        if shouldInclude(.photo) {
+            entries.append(contentsOf: scan.photoFiles.map { file in
+                TransferEntry(file: file, fallbackDir: photoDir, type: .photo)
+            })
         }
-        return result
+        if shouldInclude(.video) {
+            entries.append(contentsOf: scan.videoFiles.map { file in
+                TransferEntry(file: file, fallbackDir: videoDir, type: .video)
+            })
+        }
+        return entries
     }
 
-    private func moveOrCopy(
-        _ file: URL,
-        to target: URL,
-        result: inout TransferResult,
-        signature: String?,
-        knownSignatures: inout Set<String>
+    private func processEntries(
+        _ entries: [TransferEntry],
+        cardName: String,
+        totalFiles: Int,
+        state: ImportState,
+        onProgress: ((ProgressUpdate) -> Void)?
     ) {
+        guard !entries.isEmpty else { return }
+
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = state.maxConcurrentTransfers
+        queue.qualityOfService = .userInitiated
+
+        for entry in entries {
+            queue.addOperation {
+                let actualDestDir = destinationDir(type: entry.type, fileURL: entry.file, fallback: entry.fallbackDir)
+                createDirectory(actualDestDir)
+                let target = actualDestDir.appendingPathComponent(entry.file.lastPathComponent)
+                let signature = fileSignature(for: entry.file)
+                let resolution = state.resolveDestination(
+                    source: entry.file,
+                    proposedTarget: target,
+                    signature: signature,
+                    duplicatePolicy: settings.duplicatePolicy
+                )
+
+                switch resolution {
+                case .skip:
+                    let progress = state.markCompleted(cardName: cardName, fileName: entry.file.lastPathComponent, cardTotal: entries.count, totalFiles: totalFiles)
+                    onProgress?(progress)
+                case .transfer(let finalTarget, let signatureToTrack):
+                    let didCopy = moveOrCopy(entry.file, to: finalTarget)
+                    state.finishTransfer(
+                        target: finalTarget,
+                        signature: signatureToTrack,
+                        succeeded: didCopy
+                    )
+                    let progress = state.markCompleted(cardName: cardName, fileName: entry.file.lastPathComponent, cardTotal: entries.count, totalFiles: totalFiles)
+                    onProgress?(progress)
+                }
+            }
+        }
+
+        queue.waitUntilAllOperationsAreFinished()
+    }
+
+    private func moveOrCopy(_ file: URL, to target: URL) -> Bool {
         do {
             if settings.action == .move {
                 try FileManager.default.moveItem(at: file, to: target)
             } else {
                 try FileManager.default.copyItem(at: file, to: target)
             }
-            result.copied += 1
-            if let signature {
-                knownSignatures.insert(signature)
-            }
+            return true
         } catch {
-            result.skipped += 1
+            return false
         }
     }
 
@@ -297,12 +308,25 @@ struct Importer {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
-    private func eject(volume: URL) {
-        guard FileManager.default.fileExists(atPath: volume.path) else { return }
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        task.arguments = ["eject", volume.path]
-        try? task.run()
+    private func eject(volume: URL) -> String? {
+        guard FileManager.default.fileExists(atPath: volume.path) else { return nil }
+        do {
+            try ensureVolumeIsEjectable(volume)
+            try NSWorkspace.shared.unmountAndEjectDevice(at: volume)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    private func mountedVolumeRoot(for source: URL) -> URL? {
+        let standardizedPath = source.standardizedFileURL.path
+        let components = NSString(string: standardizedPath).pathComponents
+        guard components.count >= 3, components[0] == "/", components[1] == "Volumes" else {
+            return nil
+        }
+        let volumePath = NSString.path(withComponents: Array(components.prefix(3)))
+        return URL(fileURLWithPath: volumePath, isDirectory: true)
     }
 
     private func destinationDir(type: MediaType) -> URL {
@@ -387,6 +411,21 @@ struct Importer {
                 : settings.videoFolderName
         }
     }
+
+    private func ensureVolumeIsEjectable(_ volume: URL) throws {
+        let values = try volume.resourceValues(forKeys: [.volumeIsRemovableKey, .volumeIsEjectableKey, .volumeIsInternalKey])
+        if values.volumeIsInternal == true {
+            throw NSError(domain: "CameraFileSortSwift.Eject", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "This volume is internal and cannot be ejected."
+            ])
+        }
+        let canEject = values.volumeIsRemovable == true || values.volumeIsEjectable == true
+        if !canEject {
+            throw NSError(domain: "CameraFileSortSwift.Eject", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "This volume cannot be safely ejected."
+            ])
+        }
+    }
 }
 
 struct SourceScan {
@@ -415,4 +454,146 @@ private extension URL {
         if ext.isEmpty { return "" }
         return ".\(ext)"
     }
+}
+
+private struct TransferEntry {
+    let file: URL
+    let fallbackDir: URL
+    let type: MediaType
+}
+
+private enum DestinationResolution {
+    case skip
+    case transfer(URL, String?)
+}
+
+private struct ImportStateData {
+    var knownSignatures: Set<String>
+    var reservedSignatures: Set<String> = []
+    var reservedTargets: Set<String> = []
+    var result = TransferResult()
+    var overallCompleted = 0
+    var cardCompleted: [String: Int] = [:]
+}
+
+private final class ImportState {
+    let maxConcurrentTransfers: Int
+    private let state: Locked<ImportStateData>
+
+    init(knownSignatures: Set<String>, maxConcurrentTransfers: Int) {
+        self.maxConcurrentTransfers = maxConcurrentTransfers
+        self.state = Locked(ImportStateData(knownSignatures: knownSignatures))
+    }
+
+    func resolveDestination(
+        source: URL,
+        proposedTarget: URL,
+        signature: String?,
+        duplicatePolicy: DuplicatePolicy
+    ) -> DestinationResolution {
+        state.withLock { data in
+            let hasSignatureCollision = signature.map {
+                data.knownSignatures.contains($0) || data.reservedSignatures.contains($0)
+            } ?? false
+            let targetPath = proposedTarget.path
+            let hasTargetCollision = data.reservedTargets.contains(targetPath) || FileManager.default.fileExists(atPath: targetPath)
+            let hasDuplicate = hasSignatureCollision || hasTargetCollision
+
+            if hasDuplicate {
+                data.result.duplicates += 1
+                switch duplicatePolicy {
+                case .skip, .prompt:
+                    data.result.skipped += 1
+                    return .skip
+                case .keepBoth:
+                    let unique = uniqueDestination(for: proposedTarget, reservedTargets: data.reservedTargets)
+                    data.reservedTargets.insert(unique.path)
+                    if let signature {
+                        data.reservedSignatures.insert(signature)
+                    }
+                    return .transfer(unique, signature)
+                case .overwrite:
+                    if FileManager.default.fileExists(atPath: targetPath) {
+                        try? FileManager.default.removeItem(at: proposedTarget)
+                    }
+                    data.reservedTargets.insert(targetPath)
+                    if let signature {
+                        data.reservedSignatures.insert(signature)
+                    }
+                    return .transfer(proposedTarget, signature)
+                }
+            }
+
+            data.reservedTargets.insert(targetPath)
+            if let signature {
+                data.reservedSignatures.insert(signature)
+            }
+            return .transfer(proposedTarget, signature)
+        }
+    }
+
+    func finishTransfer(target: URL, signature: String?, succeeded: Bool) {
+        state.withLock { data in
+            data.reservedTargets.remove(target.path)
+            if let signature {
+                data.reservedSignatures.remove(signature)
+            }
+
+            if succeeded {
+                data.result.copied += 1
+                if let signature {
+                    data.knownSignatures.insert(signature)
+                }
+            } else {
+                data.result.skipped += 1
+            }
+        }
+    }
+
+    func markCompleted(cardName: String, fileName: String, cardTotal: Int, totalFiles: Int) -> ProgressUpdate {
+        state.withLock { data in
+            data.overallCompleted += 1
+            data.cardCompleted[cardName, default: 0] += 1
+            let cardIndex = data.cardCompleted[cardName, default: 0]
+            return ProgressUpdate(
+                currentCard: cardName,
+                currentFile: fileName,
+                cardProgress: progressValue(index: cardIndex, total: cardTotal),
+                overallProgress: progressValue(index: data.overallCompleted, total: totalFiles),
+                overallIndex: data.overallCompleted
+            )
+        }
+    }
+
+    func snapshotResult() -> TransferResult {
+        state.withLock { $0.result }
+    }
+
+    func snapshotKnownSignatures() -> Set<String> {
+        state.withLock { $0.knownSignatures }
+    }
+
+    private func uniqueDestination(for target: URL, reservedTargets: Set<String>) -> URL {
+        let base = target.deletingPathExtension().lastPathComponent
+        let ext = target.pathExtension
+        var counter = 1
+        while true {
+            let candidate = target.deletingLastPathComponent()
+                .appendingPathComponent("\(base)_\(counter)")
+                .appendingPathExtension(ext)
+            if !reservedTargets.contains(candidate.path) && !FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+            counter += 1
+        }
+    }
+}
+
+private func recommendedTransferConcurrency() -> Int {
+    min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 2))
+}
+
+private func progressValue(index: Int, total: Int) -> Double {
+    guard total > 0 else { return 0 }
+    return Double(index) / Double(total)
 }

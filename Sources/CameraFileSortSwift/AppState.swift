@@ -21,35 +21,52 @@ final class AppState: ObservableObject {
 
     private static let settingsKey = "CameraFileSortSwift.Settings"
     private static let defaultRootKey = "CameraFileSortSwift.DefaultRoot"
+    private var manualSources: [URL] = []
+    private var workspaceObserverTokens: [NSObjectProtocol] = []
     @Published var hasDefaultRoot: Bool = false
+    @Published var isCurrentDefaultRoot: Bool = false
 
     init() {
+        let savedDefaultRoot = UserDefaults.standard.string(forKey: Self.defaultRootKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
         if let data = UserDefaults.standard.data(forKey: Self.settingsKey),
            let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
             settings = decoded
+            if settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                settings.destinationRoot = effectiveDefaultRoot(savedDefaultRoot: savedDefaultRoot)
+            }
         } else {
             settings = .default
-            if let savedDefault = UserDefaults.standard.string(forKey: Self.defaultRootKey), !savedDefault.isEmpty {
-                settings.destinationRoot = savedDefault
-                hasDefaultRoot = true
-            } else if settings.destinationRoot.isEmpty {
-                settings.destinationRoot = (FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first?.path ?? "/Users/Shared")
-                    + "/Camera Imports"
-            }
+            settings.destinationRoot = effectiveDefaultRoot(savedDefaultRoot: savedDefaultRoot)
         }
+        refreshDefaultRootState()
+        destinationValid = validateDestination(allowCreatablePath: true)
         refreshCards()
+        startMonitoringVolumes()
+    }
+
+    deinit {
+        for token in workspaceObserverTokens {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
     }
 
     func setDefaultRoot() {
         let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        settings.destinationRoot = trimmed
+        guard validateDestination(createIfMissing: true, allowCreatablePath: true) else {
+            alert = AppAlert(title: "Invalid path", message: "Please choose a valid destination folder.")
+            return
+        }
         UserDefaults.standard.set(trimmed, forKey: Self.defaultRootKey)
-        hasDefaultRoot = true
+        refreshDefaultRootState()
     }
 
     func clearDefaultRoot() {
         UserDefaults.standard.removeObject(forKey: Self.defaultRootKey)
-        hasDefaultRoot = false
+        refreshDefaultRootState()
     }
 
     func saveSettings() {
@@ -65,13 +82,16 @@ final class AppState: ObservableObject {
 
     func resetDestinationDefaults() {
         let def = AppSettings.default
-        settings.destinationRoot = def.destinationRoot
+        clearDefaultRoot()
+        settings.destinationRoot = ""
         settings.importDateFormat = def.importDateFormat
         settings.destinationMode = def.destinationMode
         settings.sameFolderName = def.sameFolderName
         settings.photoFolderName = def.photoFolderName
         settings.videoFolderName = def.videoFolderName
         settings.dateSource = def.dateSource
+        refreshDefaultRootState()
+        destinationValid = validateDestination(allowCreatablePath: true)
         saveSettings()
     }
 
@@ -93,13 +113,31 @@ final class AppState: ObservableObject {
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url {
             settings.destinationRoot = url.path
-            destinationValid = validateDestination()
+            refreshDefaultRootState()
+            destinationValid = validateDestination(allowCreatablePath: true)
         }
     }
 
+    func chooseSource() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose source drive or folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        if panel.runModal() == .OK {
+            manualSources.append(contentsOf: panel.urls)
+            rebuildSources(selectAll: true)
+        }
+    }
+
+    func destinationRootDidChange() {
+        refreshDefaultRootState()
+        destinationValid = validateDestination(allowCreatablePath: true)
+    }
+
     func refreshCards() {
-        detectedCards = CameraScanner.detectCards(includePaths: settings.includePaths)
-        selectedCards = Set(detectedCards)
+        rebuildSources(selectAll: true)
     }
 
     func scanMediaCounts() {
@@ -204,10 +242,16 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async {
                 self.isImporting = false
                 self.canOpenDestination = true
+                self.cardProgress = 1
+                self.overallProgress = 1
+                self.processedCount = self.totalCount
                 self.statusMessage = "Done. Copied \(result.copied), skipped \(result.skipped)."
+                let ejectFailureMessage = result.ejectFailures.isEmpty
+                    ? ""
+                    : "\n\nEject issues:\n" + result.ejectFailures.joined(separator: "\n")
                 self.alert = AppAlert(
                     title: "Import complete",
-                    message: "Copied \(result.copied). Skipped \(result.skipped). Duplicates \(result.duplicates)."
+                    message: "Copied \(result.copied). Skipped \(result.skipped). Duplicates \(result.duplicates)." + ejectFailureMessage
                 )
                 self.refreshCards()
             }
@@ -261,7 +305,7 @@ final class AppState: ObservableObject {
     }
 
     @discardableResult
-    func validateDestination(createIfMissing: Bool = false) -> Bool {
+    func validateDestination(createIfMissing: Bool = false, allowCreatablePath: Bool = false) -> Bool {
         let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             destinationValid = false
@@ -270,6 +314,10 @@ final class AppState: ObservableObject {
         let url = URL(fileURLWithPath: trimmed)
         var isDir: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+            destinationValid = true
+            return true
+        }
+        if allowCreatablePath, destinationParentExists(for: url) {
             destinationValid = true
             return true
         }
@@ -285,6 +333,94 @@ final class AppState: ObservableObject {
         }
         destinationValid = false
         return false
+    }
+
+    private func effectiveDefaultRoot(savedDefaultRoot: String? = nil) -> String {
+        if let savedDefaultRoot, !savedDefaultRoot.isEmpty {
+            return savedDefaultRoot
+        }
+        return ""
+    }
+
+    private func destinationParentExists(for url: URL) -> Bool {
+        var current = url.deletingLastPathComponent()
+        while current.path != url.path {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: current.path, isDirectory: &isDirectory) {
+                return isDirectory.boolValue
+            }
+            let parent = current.deletingLastPathComponent()
+            if parent.path == current.path {
+                break
+            }
+            current = parent
+        }
+        return false
+    }
+
+    private func refreshDefaultRootState() {
+        let savedDefaultRoot = UserDefaults.standard.string(forKey: Self.defaultRootKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        hasDefaultRoot = savedDefaultRoot?.isEmpty == false
+        isCurrentDefaultRoot = hasDefaultRoot && savedDefaultRoot == trimmed
+    }
+
+    private func startMonitoringVolumes() {
+        let center = NSWorkspace.shared.notificationCenter
+        let notifications: [Notification.Name] = [
+            NSWorkspace.didMountNotification,
+            NSWorkspace.didUnmountNotification,
+            NSWorkspace.didRenameVolumeNotification
+        ]
+
+        workspaceObserverTokens = notifications.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                self?.handleVolumeEvent(notification)
+            }
+        }
+    }
+
+    private func handleVolumeEvent(_ notification: Notification) {
+        let volumeURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL
+        let volumeName = notification.userInfo?[NSWorkspace.localizedVolumeNameUserInfoKey] as? String
+        rebuildSources(selectAll: false, autoSelectNewSources: true)
+
+        guard !isImporting else { return }
+        switch notification.name {
+        case NSWorkspace.didMountNotification:
+            statusMessage = "Mounted \(volumeName ?? volumeURL?.lastPathComponent ?? "volume")"
+        case NSWorkspace.didUnmountNotification:
+            statusMessage = "Unmounted \(volumeName ?? volumeURL?.lastPathComponent ?? "volume")"
+        case NSWorkspace.didRenameVolumeNotification:
+            statusMessage = "Updated \(volumeName ?? volumeURL?.lastPathComponent ?? "volume")"
+        default:
+            break
+        }
+    }
+
+    private func rebuildSources(selectAll: Bool, autoSelectNewSources: Bool = false) {
+        let previousDetectedPaths = Set(detectedCards.map(\.path))
+        let previousSelectedPaths = Set(selectedCards.map(\.path))
+        let autoDetected = CameraScanner.detectCards(includePaths: settings.includePaths)
+        let merged = autoDetected + manualSources
+        var seen = Set<String>()
+        let unique = merged.filter { source in
+            seen.insert(source.path).inserted
+        }
+        manualSources = manualSources.filter { source in
+            unique.contains(where: { $0.path == source.path })
+        }
+        detectedCards = unique
+        if selectAll {
+            selectedCards = Set(unique)
+        } else {
+            let newSourcePaths = Set(unique.map(\.path)).subtracting(previousDetectedPaths)
+            selectedCards = Set(unique.filter { source in
+                previousSelectedPaths.contains(source.path) ||
+                (autoSelectNewSources && newSourcePaths.contains(source.path))
+            })
+        }
     }
 
 }

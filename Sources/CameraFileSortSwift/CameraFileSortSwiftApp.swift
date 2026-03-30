@@ -8,7 +8,7 @@ struct CameraFileSortSwiftApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appState)
-                .frame(idealWidth: 780, idealHeight: 520)
+                .frame(minWidth: 1080, idealWidth: 1080, minHeight: 500, idealHeight: 500)
         }
         .windowResizability(.contentSize)
     }

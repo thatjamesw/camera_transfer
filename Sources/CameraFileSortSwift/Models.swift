@@ -113,4 +113,5 @@ struct TransferResult {
     var copied: Int = 0
     var skipped: Int = 0
     var duplicates: Int = 0
+    var ejectFailures: [String] = []
 }
