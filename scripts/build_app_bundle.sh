@@ -2,6 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Camera Media Importer"
+APP_VERSION="1.6.0"
 LEGACY_APP_NAME="Camera Media Transfer Wizard"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/.build/release"
@@ -34,9 +35,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key>
   <string>com.jameswright.camerafilesort</string>
   <key>CFBundleVersion</key>
-  <string>1.0</string>
+  <string>${APP_VERSION}</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>${APP_VERSION}</string>
   <key>CFBundleExecutable</key>
   <string>CameraFileSortSwift</string>
   <key>CFBundleIconFile</key>
