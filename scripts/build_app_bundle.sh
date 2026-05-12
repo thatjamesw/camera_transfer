@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="Camera Media Transfer Wizard"
+APP_NAME="Camera Media Importer"
+LEGACY_APP_NAME="Camera Media Transfer Wizard"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/.build/release"
 APP_DIR="$ROOT_DIR/dist/${APP_NAME}.app"
@@ -17,6 +18,8 @@ fi
 swift build -c release
 
 rm -rf "$APP_DIR"
+rm -rf "$ROOT_DIR/dist/${LEGACY_APP_NAME}.app"
+rm -f "$ROOT_DIR/dist/${LEGACY_APP_NAME}.zip"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST

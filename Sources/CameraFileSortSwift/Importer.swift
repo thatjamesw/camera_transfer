@@ -1,8 +1,21 @@
 import AppKit
+import Darwin
 import Foundation
 
 struct CameraScanner {
     static func detectCards(includePaths: [String]) -> [URL] {
+        mountedRemovableVolumes().filter { url in
+            for rel in includePaths {
+                let candidate = url.appendingPathComponent(rel)
+                if FileManager.default.fileExists(atPath: candidate.path) {
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    static func mountedRemovableVolumes() -> [URL] {
         let volumesURL = URL(fileURLWithPath: "/Volumes", isDirectory: true)
         guard let items = try? FileManager.default.contentsOfDirectory(at: volumesURL, includingPropertiesForKeys: nil) else {
             return []
@@ -12,16 +25,7 @@ struct CameraScanner {
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
                 return false
             }
-            if shouldExcludeVolume(url) {
-                return false
-            }
-            for rel in includePaths {
-                let candidate = url.appendingPathComponent(rel)
-                if FileManager.default.fileExists(atPath: candidate.path) {
-                    return true
-                }
-            }
-            return false
+            return !shouldExcludeVolume(url)
         }
     }
 
@@ -87,17 +91,15 @@ struct Importer {
             results[index].withLock { $0 = scan }
         }
 
-        return results.compactMap { $0.withLock { $0 } }
+        let scans = deduplicatedScans(results.compactMap { $0.withLock { $0 } })
+        return scansWithImportDuplicateFlags(scans, knownSignatures: knownSignatures)
     }
 
-    func runImport(
-        from sources: [URL],
-        scans: [SourceScan],
-        onProgress: ((ProgressUpdate) -> Void)? = nil
-    ) -> TransferResult {
+    func runImport(scans: [SourceScan], onProgress: ((ProgressUpdate) -> Void)? = nil) -> TransferResult {
         var result = TransferResult()
-        let totalPhoto = scans.reduce(0) { $0 + $1.photoFiles.count }
-        let totalVideo = scans.reduce(0) { $0 + $1.videoFiles.count }
+        let importScans = deduplicatedScans(scans)
+        let totalPhoto = importScans.reduce(0) { $0 + $1.photoFiles.count }
+        let totalVideo = importScans.reduce(0) { $0 + $1.videoFiles.count }
         let totalFiles = totalPhoto + totalVideo
         if totalFiles == 0 {
             return result
@@ -112,7 +114,7 @@ struct Importer {
             maxConcurrentTransfers: recommendedTransferConcurrency()
         )
 
-        for scan in scans {
+        for scan in importScans {
             let cardFiles = buildTransferEntries(for: scan, photoDir: photoDir, videoDir: videoDir)
             let cardName = scan.source.lastPathComponent
             processEntries(
@@ -131,12 +133,9 @@ struct Importer {
         }
 
         if settings.ejectAfter {
-            var seenVolumePaths = Set<String>()
-            for scan in scans {
-                guard let volume = mountedVolumeRoot(for: scan.source) else { continue }
-                guard seenVolumePaths.insert(volume.path).inserted else { continue }
-                if let failure = eject(volume: volume) {
-                    result.ejectFailures.append("\(volume.lastPathComponent): \(failure)")
+            for target in ejectTargets(for: scans) {
+                if let failure = eject(target: target) {
+                    result.ejectFailures.append("\(target.displayName): \(failure)")
                 }
             }
         }
@@ -157,6 +156,68 @@ struct Importer {
             }
         }
         return files
+    }
+
+    private func deduplicatedScans(_ scans: [SourceScan]) -> [SourceScan] {
+        var seenFiles = Set<String>()
+        return scans.compactMap { scan in
+            let photoFiles = uniqueMediaFiles(scan.photoFiles, seenFiles: &seenFiles)
+            let videoFiles = uniqueMediaFiles(scan.videoFiles, seenFiles: &seenFiles)
+            guard !photoFiles.isEmpty || !videoFiles.isEmpty else {
+                return nil
+            }
+            return SourceScan(
+                source: scan.source,
+                photoFiles: photoFiles,
+                videoFiles: videoFiles,
+                hasDuplicates: scan.hasDuplicates
+            )
+        }
+    }
+
+    private func uniqueMediaFiles(_ files: [URL], seenFiles: inout Set<String>) -> [URL] {
+        files.filter { file in
+            seenFiles.insert(mediaIdentity(for: file)).inserted
+        }
+    }
+
+    private func mediaIdentity(for file: URL) -> String {
+        var info = stat()
+        let path = file.standardizedFileURL.path
+        if stat(path, &info) == 0 {
+            return "file:\(info.st_dev):\(info.st_ino)"
+        }
+        return "path:\(path)"
+    }
+
+    private func scansWithImportDuplicateFlags(_ scans: [SourceScan], knownSignatures: Set<String>) -> [SourceScan] {
+        var seenSignatures = Set<String>()
+        var seenTargets = Set<String>()
+
+        return scans.map { scan in
+            var hasDuplicates = scan.hasDuplicates
+            for entry in buildTransferEntries(
+                for: scan,
+                photoDir: destinationDir(type: .photo),
+                videoDir: destinationDir(type: .video)
+            ) {
+                let target = destinationDir(type: entry.type, fileURL: entry.file, fallback: entry.fallbackDir)
+                    .appendingPathComponent(entry.file.lastPathComponent)
+                if FileManager.default.fileExists(atPath: target.path) || !seenTargets.insert(target.path).inserted {
+                    hasDuplicates = true
+                }
+                if let signature = fileSignature(for: entry.file),
+                   knownSignatures.contains(signature) || !seenSignatures.insert(signature).inserted {
+                    hasDuplicates = true
+                }
+            }
+            return SourceScan(
+                source: scan.source,
+                photoFiles: scan.photoFiles,
+                videoFiles: scan.videoFiles,
+                hasDuplicates: hasDuplicates
+            )
+        }
     }
 
     private func hasDuplicatesForFiles(files: [URL], type: MediaType, knownSignatures: Set<String>) -> Bool {
@@ -289,34 +350,8 @@ struct Importer {
             .appendingPathComponent(".camera_transfer_manifest.json")
     }
 
-    private func uniqueDestination(for target: URL) -> URL {
-        let base = target.deletingPathExtension().lastPathComponent
-        let ext = target.pathExtension
-        var counter = 1
-        while true {
-            let candidate = target.deletingLastPathComponent()
-                .appendingPathComponent("\(base)_\(counter)")
-                .appendingPathExtension(ext)
-            if !FileManager.default.fileExists(atPath: candidate.path) {
-                return candidate
-            }
-            counter += 1
-        }
-    }
-
     private func createDirectory(_ url: URL) {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    }
-
-    private func eject(volume: URL) -> String? {
-        guard FileManager.default.fileExists(atPath: volume.path) else { return nil }
-        do {
-            try ensureVolumeIsEjectable(volume)
-            try NSWorkspace.shared.unmountAndEjectDevice(at: volume)
-            return nil
-        } catch {
-            return error.localizedDescription
-        }
     }
 
     private func mountedVolumeRoot(for source: URL) -> URL? {
@@ -426,6 +461,206 @@ struct Importer {
             ])
         }
     }
+
+    private func ejectTargets(for scans: [SourceScan]) -> [EjectTarget] {
+        let selectedVolumes = scans.compactMap { mountedVolumeRoot(for: $0.source) }
+        guard !selectedVolumes.isEmpty else { return [] }
+
+        let mountedVolumes = CameraScanner.mountedRemovableVolumes()
+        var groupedVolumes: [String: [URL]] = [:]
+        var metadataByPath: [String: DiskMetadata] = [:]
+        for volume in mountedVolumes {
+            guard let metadata = diskMetadata(for: volume) else { continue }
+            metadataByPath[volume.path] = metadata
+            groupedVolumes[metadata.wholeDiskIdentifier, default: []].append(volume)
+        }
+
+        let selectedMetadata = selectedVolumes.compactMap { metadataByPath[$0.path] ?? diskMetadata(for: $0) }
+        let selectedGroupingKeys = Set(selectedMetadata.flatMap(\.cameraGroupingKeys))
+        let selectedWholeDisks = Set(selectedMetadata.map(\.wholeDiskIdentifier))
+        let companionVolumes = mountedVolumes.filter { volume in
+            guard !selectedVolumes.contains(where: { $0.path == volume.path }) else { return false }
+            guard looksLikeCameraCompanionVolume(volume) else { return false }
+            guard let metadata = metadataByPath[volume.path] else { return true }
+            if selectedWholeDisks.contains(metadata.wholeDiskIdentifier) {
+                return true
+            }
+            return !selectedGroupingKeys.isDisjoint(with: metadata.cameraGroupingKeys)
+        }
+        let volumesToEject = selectedVolumes + companionVolumes
+
+        var seenIdentifiers = Set<String>()
+        var targets: [EjectTarget] = []
+        for volume in volumesToEject {
+            if let metadata = metadataByPath[volume.path] ?? diskMetadata(for: volume) {
+                guard seenIdentifiers.insert(metadata.wholeDiskIdentifier).inserted else { continue }
+                let siblingVolumes = groupedVolumes[metadata.wholeDiskIdentifier] ?? [volume]
+                targets.append(.wholeDisk(identifier: metadata.wholeDiskIdentifier, volumes: siblingVolumes.sorted { $0.path < $1.path }))
+                continue
+            }
+
+            guard seenIdentifiers.insert(volume.path).inserted else { continue }
+            targets.append(.volume(volume))
+        }
+
+        return targets
+    }
+
+    private func looksLikeCameraCompanionVolume(_ volume: URL) -> Bool {
+        if volume.lastPathComponent.caseInsensitiveCompare("PMHOME") == .orderedSame {
+            return true
+        }
+        for rel in settings.includePaths {
+            if FileManager.default.fileExists(atPath: volume.appendingPathComponent(rel).path) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func eject(target: EjectTarget) -> String? {
+        switch target {
+        case .wholeDisk(let identifier, let volumes):
+            guard volumes.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+                return nil
+            }
+            do {
+                try ejectWholeDisk(identifier)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        case .volume(let volume):
+            guard FileManager.default.fileExists(atPath: volume.path) else { return nil }
+            do {
+                try ensureVolumeIsEjectable(volume)
+                try NSWorkspace.shared.unmountAndEjectDevice(at: volume)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+    }
+
+    private func diskMetadata(for volume: URL) -> DiskMetadata? {
+        guard let info = diskInfo(for: volume) else {
+            return nil
+        }
+        guard let wholeDiskIdentifier = wholeDiskIdentifier(from: info) else {
+            return nil
+        }
+        return DiskMetadata(
+            wholeDiskIdentifier: wholeDiskIdentifier,
+            cameraGroupingKeys: cameraGroupingKeys(from: info)
+        )
+    }
+
+    private func wholeDiskIdentifier(from info: [String: Any]) -> String? {
+        if let wholeDisk = info["ParentWholeDisk"] as? String, !wholeDisk.isEmpty {
+            return wholeDisk
+        }
+        if let wholeDisk = info["PartOfWhole"] as? String, !wholeDisk.isEmpty {
+            return wholeDisk
+        }
+        if info["WholeDisk"] as? Bool == true, let deviceIdentifier = info["DeviceIdentifier"] as? String, !deviceIdentifier.isEmpty {
+            return deviceIdentifier
+        }
+        return nil
+    }
+
+    private func cameraGroupingKeys(from info: [String: Any]) -> Set<String> {
+        let keyNames = [
+            "BusProtocol",
+            "DeviceLocation",
+            "DeviceTreePath",
+            "IORegistryEntryName",
+            "MediaName",
+            "Protocol",
+            "RAIDMaster",
+            "SolidState"
+        ]
+        return Set(keyNames.compactMap { key in
+            guard let value = info[key] else { return nil }
+            if let stringValue = value as? String, !stringValue.isEmpty {
+                return "\(key)=\(stringValue)"
+            }
+            if let boolValue = value as? Bool {
+                return "\(key)=\(boolValue)"
+            }
+            return nil
+        })
+    }
+
+    private func diskInfo(for volume: URL) -> [String: Any]? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        process.arguments = ["info", "-plist", volume.path]
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        guard process.terminationStatus == 0 else {
+            return nil
+        }
+
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        guard let plist = try? PropertyListSerialization.propertyList(from: outputData, options: [], format: nil),
+              let info = plist as? [String: Any] else {
+            return nil
+        }
+        return info
+    }
+
+    private func ejectWholeDisk(_ identifier: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        process.arguments = ["eject", identifier]
+
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        process.standardOutput = Pipe()
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(domain: "CameraFileSortSwift.Eject", code: Int(process.terminationStatus), userInfo: [
+                NSLocalizedDescriptionKey: message?.isEmpty == false ? message! : "diskutil failed to eject the device."
+            ])
+        }
+    }
+}
+
+private enum EjectTarget {
+    case wholeDisk(identifier: String, volumes: [URL])
+    case volume(URL)
+
+    var displayName: String {
+        switch self {
+        case .wholeDisk(_, let volumes):
+            let names = volumes.map(\.lastPathComponent).sorted()
+            return names.joined(separator: ", ")
+        case .volume(let volume):
+            return volume.lastPathComponent
+        }
+    }
+}
+
+private struct DiskMetadata {
+    let wholeDiskIdentifier: String
+    let cameraGroupingKeys: Set<String>
 }
 
 struct SourceScan {

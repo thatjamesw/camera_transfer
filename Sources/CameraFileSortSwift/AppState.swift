@@ -17,7 +17,6 @@ final class AppState: ObservableObject {
     @Published var lastScanSummary: String = "Not scanned"
     @Published var processedCount: Int = 0
     @Published var totalCount: Int = 0
-    @Published var canOpenDestination: Bool = false
 
     private static let settingsKey = "CameraFileSortSwift.Settings"
     private static let defaultRootKey = "CameraFileSortSwift.DefaultRoot"
@@ -53,6 +52,7 @@ final class AppState: ObservableObject {
     }
 
     func setDefaultRoot() {
+        guard !isImporting else { return }
         let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         settings.destinationRoot = trimmed
@@ -81,6 +81,7 @@ final class AppState: ObservableObject {
     }
 
     func resetDestinationDefaults() {
+        guard !isImporting else { return }
         let def = AppSettings.default
         clearDefaultRoot()
         settings.destinationRoot = ""
@@ -96,6 +97,7 @@ final class AppState: ObservableObject {
     }
 
     func resetTransferDefaults() {
+        guard !isImporting else { return }
         let def = AppSettings.default
         settings.mediaSelection = def.mediaSelection
         settings.action = def.action
@@ -105,6 +107,7 @@ final class AppState: ObservableObject {
     }
 
     func chooseDestination() {
+        guard !isImporting else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose destination folder"
         panel.canChooseFiles = false
@@ -119,6 +122,7 @@ final class AppState: ObservableObject {
     }
 
     func chooseSource() {
+        guard !isImporting else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose source drive or folder"
         panel.canChooseFiles = false
@@ -137,10 +141,12 @@ final class AppState: ObservableObject {
     }
 
     func refreshCards() {
+        guard !isImporting else { return }
         rebuildSources(selectAll: true)
     }
 
     func scanMediaCounts() {
+        guard !isImporting else { return }
         let sources = Array(selectedCards)
         guard !sources.isEmpty else {
             alert = AppAlert(title: "No cards selected", message: "Please select at least one card.")
@@ -176,7 +182,6 @@ final class AppState: ObservableObject {
         }
 
         isImporting = true
-        canOpenDestination = false
         statusMessage = "Scanning files..."
         overallProgress = 0
         cardProgress = 0
@@ -194,7 +199,6 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async {
                 if totalFiles == 0 {
                     self.isImporting = false
-                    self.canOpenDestination = false
                     self.statusMessage = "No media found."
                     self.alert = AppAlert(title: "No media found", message: "No matching files were found on the selected cards.")
                     return
@@ -221,7 +225,6 @@ final class AppState: ObservableObject {
     }
 
     private func runImport(with policy: DuplicatePolicy, scans: [SourceScan]) {
-        let sources = Array(selectedCards)
         let settings = settings
         statusMessage = "Importing..."
 
@@ -229,7 +232,7 @@ final class AppState: ObservableObject {
             var mutableSettings = settings
             mutableSettings.duplicatePolicy = policy
             let importer = Importer(settings: mutableSettings)
-            let result = importer.runImport(from: sources, scans: scans) { update in
+            let result = importer.runImport(scans: scans) { update in
                 DispatchQueue.main.async {
                     self.currentCardName = update.currentCard
                     self.currentFileName = update.currentFile
@@ -241,7 +244,6 @@ final class AppState: ObservableObject {
 
             DispatchQueue.main.async {
                 self.isImporting = false
-                self.canOpenDestination = true
                 self.cardProgress = 1
                 self.overallProgress = 1
                 self.processedCount = self.totalCount
@@ -294,8 +296,10 @@ final class AppState: ObservableObject {
     }
 
     func openDestination() {
+        guard !isImporting else { return }
         let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        guard validateDestination(createIfMissing: true, allowCreatablePath: true) else { return }
         let url = URL(fileURLWithPath: trimmed)
         NSWorkspace.shared.open(url)
     }
