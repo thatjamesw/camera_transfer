@@ -69,53 +69,104 @@ private final class Locked<Value> {
 
 struct Importer {
     let settings: AppSettings
+    let importDate: Date
+    private let formatter: Locked<DateFormatter>
+
+    init(settings: AppSettings, importDate: Date = Date()) {
+        self.settings = settings
+        self.importDate = importDate
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = settings.importDateFormat
+        self.formatter = Locked(formatter)
+    }
+
+    private var primaryExtensions: Set<String> {
+        Set((settings.photoExtensions + settings.videoExtensions).map { normalizedExtension($0) })
+    }
+
+    private var companionExtensions: Set<String> {
+        Set([
+            ".aae", ".bim", ".cpi", ".dop", ".lrf", ".lrv", ".mpl", ".pp3",
+            ".rpp", ".srt", ".thm", ".wav", ".xmp", ".xml"
+        ])
+    }
 
     func scanSources(_ sources: [URL]) -> [SourceScan] {
-        let knownSignatures = loadManifest()
         let scanCount = sources.count
         guard scanCount > 0 else { return [] }
 
-        let results = Array(repeating: Locked<SourceScan?>(nil), count: scanCount)
+        let results = (0..<scanCount).map { _ in Locked<SourceScan?>(nil) }
         DispatchQueue.concurrentPerform(iterations: scanCount) { index in
             let source = sources[index]
-            let photoFiles = shouldInclude(.photo) ? gatherFiles(in: source, extensions: settings.photoExtensions) : []
-            let videoFiles = shouldInclude(.video) ? gatherFiles(in: source, extensions: settings.videoExtensions) : []
-            let photoHasDup = shouldInclude(.photo) && hasDuplicatesForFiles(files: photoFiles, type: .photo, knownSignatures: knownSignatures)
-            let videoHasDup = shouldInclude(.video) && hasDuplicatesForFiles(files: videoFiles, type: .video, knownSignatures: knownSignatures)
+            var scanErrors: [String] = []
+            let files = gatherFiles(in: source, extensions: settings.photoExtensions + settings.videoExtensions + Array(companionExtensions), errors: &scanErrors)
+            let photoExtensions = Set(settings.photoExtensions.map { normalizedExtension($0) })
+            let photoFiles = shouldInclude(.photo) ? files.filter { photoExtensions.contains($0.pathExtensionWithDot.lowercased()) } : []
+            let videoExtensions = Set(settings.videoExtensions.map { normalizedExtension($0) })
+            let videoFiles = shouldInclude(.video) ? files.filter { videoExtensions.contains($0.pathExtensionWithDot.lowercased()) && !photoExtensions.contains($0.pathExtensionWithDot.lowercased()) } : []
             let scan = SourceScan(
                 source: source,
                 photoFiles: photoFiles,
                 videoFiles: videoFiles,
-                hasDuplicates: photoHasDup || videoHasDup
+                hasDuplicates: false,
+                errors: scanErrors,
+                companionFiles: files.filter { companionExtensions.contains($0.pathExtensionWithDot.lowercased()) }
             )
             results[index].withLock { $0 = scan }
         }
 
         let scans = deduplicatedScans(results.compactMap { $0.withLock { $0 } })
-        return scansWithImportDuplicateFlags(scans, knownSignatures: knownSignatures)
+        return scansWithImportDuplicateFlags(scans)
+    }
+
+    func transferFileCount(scans: [SourceScan]) -> Int {
+        let photoDir = destinationDir(type: .photo)
+        let videoDir = destinationDir(type: .video)
+        return deduplicatedScans(scans).reduce(0) { count, scan in
+            count + buildTransferEntries(for: scan, photoDir: photoDir, videoDir: videoDir).count
+        }
     }
 
     func runImport(scans: [SourceScan], onProgress: ((ProgressUpdate) -> Void)? = nil) -> TransferResult {
         var result = TransferResult()
+        if let error = settings.destinationConfigurationError {
+            result.failed = 1
+            result.transferFailures = [error]
+            return result
+        }
+        let scanErrors = scans.flatMap(\.errors)
+        if !scanErrors.isEmpty {
+            result.failed = scanErrors.count
+            result.transferFailures = scanErrors
+            return result
+        }
+        do { try validatePaths(sources: scans.map(\.source)) } catch {
+            result.failed = 1
+            result.transferFailures = [error.localizedDescription]
+            return result
+        }
         let importScans = deduplicatedScans(scans)
-        let totalPhoto = importScans.reduce(0) { $0 + $1.photoFiles.count }
-        let totalVideo = importScans.reduce(0) { $0 + $1.videoFiles.count }
+        let photoDir = destinationDir(type: .photo)
+        let videoDir = destinationDir(type: .video)
+        let cardEntries = importScans.map { scan in
+            buildTransferEntries(for: scan, photoDir: photoDir, videoDir: videoDir)
+        }
+        let totalPhoto = cardEntries.reduce(0) { count, entries in
+            count + entries.filter { $0.type == .photo }.count
+        }
+        let totalVideo = cardEntries.reduce(0) { count, entries in
+            count + entries.filter { $0.type == .video }.count
+        }
         let totalFiles = totalPhoto + totalVideo
         if totalFiles == 0 {
             return result
         }
 
-        let photoDir = destinationDir(type: .photo)
-        let videoDir = destinationDir(type: .video)
-        if totalPhoto > 0 { createDirectory(photoDir) }
-        if totalVideo > 0 { createDirectory(videoDir) }
-        let importState = ImportState(
-            knownSignatures: loadManifest(),
-            maxConcurrentTransfers: recommendedTransferConcurrency()
-        )
+        let importState = ImportState()
 
-        for scan in importScans {
-            let cardFiles = buildTransferEntries(for: scan, photoDir: photoDir, videoDir: videoDir)
+        for (scan, cardFiles) in zip(importScans, cardEntries) {
             let cardName = scan.source.lastPathComponent
             processEntries(
                 cardFiles,
@@ -128,11 +179,7 @@ struct Importer {
 
         result = importState.snapshotResult()
 
-        if result.copied > 0 {
-            saveManifest(importState.snapshotKnownSignatures())
-        }
-
-        if settings.ejectAfter {
+        if settings.ejectAfter && result.failed == 0 {
             for target in ejectTargets(for: scans) {
                 if let failure = eject(target: target) {
                     result.ejectFailures.append("\(target.displayName): \(failure)")
@@ -143,19 +190,42 @@ struct Importer {
         return result
     }
 
-    private func gatherFiles(in source: URL, extensions: [String]) -> [URL] {
-        let extSet = Set(extensions.map { $0.lowercased() })
-        guard let enumerator = FileManager.default.enumerator(at: source, includingPropertiesForKeys: nil) else {
+    private func gatherFiles(in source: URL, extensions: [String], errors: inout [String]) -> [URL] {
+        let extSet = Set(extensions.map { normalizedExtension($0) })
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory),
+              isDirectory.boolValue, FileManager.default.isReadableFile(atPath: source.path) else {
+            errors.append("Cannot read source: " + source.path)
+            return []
+        }
+        let failures = Locked<[String]>([])
+        guard let enumerator = FileManager.default.enumerator(
+            at: source.resolvingSymlinksInPath(),
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .creationDateKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles],
+            errorHandler: { url, error in
+                failures.withLock { $0.append(url.path + ": " + error.localizedDescription) }
+                return true
+            }
+        ) else {
+            errors.append("Cannot enumerate source: " + source.path)
             return []
         }
 
         var files: [URL] = []
         for case let url as URL in enumerator {
-            if extSet.contains(url.pathExtensionWithDot.lowercased()) {
-                files.append(url)
+            do {
+                let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                if values.isRegularFile == true, values.isSymbolicLink != true,
+                   extSet.contains(url.pathExtensionWithDot.lowercased()) {
+                    files.append(url)
+                }
+            } catch {
+                errors.append(url.path + ": " + error.localizedDescription)
             }
         }
-        return files
+        errors.append(contentsOf: failures.withLock { $0 })
+        return files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
     private func deduplicatedScans(_ scans: [SourceScan]) -> [SourceScan] {
@@ -163,14 +233,16 @@ struct Importer {
         return scans.compactMap { scan in
             let photoFiles = uniqueMediaFiles(scan.photoFiles, seenFiles: &seenFiles)
             let videoFiles = uniqueMediaFiles(scan.videoFiles, seenFiles: &seenFiles)
-            guard !photoFiles.isEmpty || !videoFiles.isEmpty else {
+            guard !photoFiles.isEmpty || !videoFiles.isEmpty || !scan.errors.isEmpty else {
                 return nil
             }
             return SourceScan(
                 source: scan.source,
                 photoFiles: photoFiles,
                 videoFiles: videoFiles,
-                hasDuplicates: scan.hasDuplicates
+                hasDuplicates: scan.hasDuplicates,
+                errors: scan.errors,
+                companionFiles: scan.companionFiles
             )
         }
     }
@@ -190,8 +262,7 @@ struct Importer {
         return "path:\(path)"
     }
 
-    private func scansWithImportDuplicateFlags(_ scans: [SourceScan], knownSignatures: Set<String>) -> [SourceScan] {
-        var seenSignatures = Set<String>()
+    private func scansWithImportDuplicateFlags(_ scans: [SourceScan]) -> [SourceScan] {
         var seenTargets = Set<String>()
 
         return scans.map { scan in
@@ -201,13 +272,9 @@ struct Importer {
                 photoDir: destinationDir(type: .photo),
                 videoDir: destinationDir(type: .video)
             ) {
-                let target = destinationDir(type: entry.type, fileURL: entry.file, fallback: entry.fallbackDir)
+                let target = destinationDir(type: entry.type, fileURL: entry.dateReferenceFile, fallback: entry.fallbackDir)
                     .appendingPathComponent(entry.file.lastPathComponent)
-                if FileManager.default.fileExists(atPath: target.path) || !seenTargets.insert(target.path).inserted {
-                    hasDuplicates = true
-                }
-                if let signature = fileSignature(for: entry.file),
-                   knownSignatures.contains(signature) || !seenSignatures.insert(signature).inserted {
+                if (try? FileManager.default.attributesOfItem(atPath: target.path)) != nil || !seenTargets.insert(target.path.lowercased()).inserted {
                     hasDuplicates = true
                 }
             }
@@ -215,38 +282,52 @@ struct Importer {
                 source: scan.source,
                 photoFiles: scan.photoFiles,
                 videoFiles: scan.videoFiles,
-                hasDuplicates: hasDuplicates
+                hasDuplicates: hasDuplicates,
+                errors: scan.errors,
+                companionFiles: scan.companionFiles
             )
         }
-    }
-
-    private func hasDuplicatesForFiles(files: [URL], type: MediaType, knownSignatures: Set<String>) -> Bool {
-        for file in files {
-            let destDir = destinationDir(type: type, fileURL: file)
-            let target = destDir.appendingPathComponent(file.lastPathComponent)
-            if FileManager.default.fileExists(atPath: target.path) {
-                return true
-            }
-            if let signature = fileSignature(for: file), knownSignatures.contains(signature) {
-                return true
-            }
-        }
-        return false
     }
 
     private func buildTransferEntries(for scan: SourceScan, photoDir: URL, videoDir: URL) -> [TransferEntry] {
         var entries: [TransferEntry] = []
         if shouldInclude(.photo) {
-            entries.append(contentsOf: scan.photoFiles.map { file in
-                TransferEntry(file: file, fallbackDir: photoDir, type: .photo)
-            })
+            entries.append(contentsOf: transferEntries(for: scan.photoFiles, fallbackDir: photoDir, type: .photo, availableCompanions: scan.companionFiles))
         }
         if shouldInclude(.video) {
-            entries.append(contentsOf: scan.videoFiles.map { file in
-                TransferEntry(file: file, fallbackDir: videoDir, type: .video)
-            })
+            entries.append(contentsOf: transferEntries(for: scan.videoFiles, fallbackDir: videoDir, type: .video, availableCompanions: scan.companionFiles))
         }
-        return entries
+        return deduplicatedTransferEntries(entries)
+    }
+
+    private func transferEntries(for files: [URL], fallbackDir: URL, type: MediaType, availableCompanions: [URL]?) -> [TransferEntry] {
+        var companionsByDirectory: [URL: [String: [URL]]] = [:]
+        let primaryExtensions = primaryExtensions
+        let companionExtensions = companionExtensions
+        let scannedByDirectory = availableCompanions.map { Dictionary(grouping: $0, by: { $0.deletingLastPathComponent() }) }
+        for directory in Set(files.map { $0.deletingLastPathComponent() }) {
+            let siblings = scannedByDirectory.map { $0[directory] ?? [] } ?? (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])) ?? []
+            let companions = siblings.filter {
+                let values = try? $0.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                let ext = normalizedExtension($0.pathExtensionWithDot)
+                return values?.isRegularFile == true && values?.isSymbolicLink != true && companionExtensions.contains(ext) && !primaryExtensions.contains(ext)
+            }
+            companionsByDirectory[directory] = Dictionary(grouping: companions, by: { $0.deletingPathExtension().lastPathComponent.lowercased() })
+        }
+        return files.flatMap { file in
+            let primary = TransferEntry(file: file, dateReferenceFile: file, fallbackDir: fallbackDir, type: type)
+            let companions = (companionsByDirectory[file.deletingLastPathComponent()]?[file.deletingPathExtension().lastPathComponent.lowercased()] ?? []).sorted { $0.path < $1.path }.map { companion in
+                TransferEntry(file: companion, dateReferenceFile: file, fallbackDir: fallbackDir, type: type)
+            }
+            return [primary] + companions
+        }
+    }
+
+    private func deduplicatedTransferEntries(_ entries: [TransferEntry]) -> [TransferEntry] {
+        var seen = Set<String>()
+        return entries.filter { entry in
+            seen.insert(mediaIdentity(for: entry.file)).inserted
+        }
     }
 
     private func processEntries(
@@ -258,20 +339,23 @@ struct Importer {
     ) {
         guard !entries.isEmpty else { return }
 
-        let queue = OperationQueue()
-        queue.maxConcurrentOperationCount = state.maxConcurrentTransfers
-        queue.qualityOfService = .userInitiated
-
+        state.beginCard(cardName)
+        let keepBoth = settings.duplicatePolicy == .keepBoth ? keepBothTargets(for: entries) : ([:], 0)
+        state.recordDuplicates(keepBoth.1)
         for entry in entries {
-            queue.addOperation {
-                let actualDestDir = destinationDir(type: entry.type, fileURL: entry.file, fallback: entry.fallbackDir)
-                createDirectory(actualDestDir)
-                let target = actualDestDir.appendingPathComponent(entry.file.lastPathComponent)
-                let signature = fileSignature(for: entry.file)
+            autoreleasepool {
+                let startedProgress = state.markStarted(
+                    cardName: cardName,
+                    fileName: entry.file.lastPathComponent,
+                    cardTotal: entries.count,
+                    totalFiles: totalFiles
+                )
+                onProgress?(startedProgress)
+
+                let actualDestDir = destinationDir(type: entry.type, fileURL: entry.dateReferenceFile, fallback: entry.fallbackDir)
+                let target = keepBoth.0[entry.file] ?? actualDestDir.appendingPathComponent(entry.file.lastPathComponent)
                 let resolution = state.resolveDestination(
-                    source: entry.file,
                     proposedTarget: target,
-                    signature: signature,
                     duplicatePolicy: settings.duplicatePolicy
                 )
 
@@ -279,12 +363,12 @@ struct Importer {
                 case .skip:
                     let progress = state.markCompleted(cardName: cardName, fileName: entry.file.lastPathComponent, cardTotal: entries.count, totalFiles: totalFiles)
                     onProgress?(progress)
-                case .transfer(let finalTarget, let signatureToTrack):
-                    let didCopy = moveOrCopy(entry.file, to: finalTarget)
+                case .transfer(let finalTarget):
+                    let outcome = moveOrCopy(entry.file, to: finalTarget)
                     state.finishTransfer(
+                        source: entry.file,
                         target: finalTarget,
-                        signature: signatureToTrack,
-                        succeeded: didCopy
+                        outcome: outcome
                     )
                     let progress = state.markCompleted(cardName: cardName, fileName: entry.file.lastPathComponent, cardTotal: entries.count, totalFiles: totalFiles)
                     onProgress?(progress)
@@ -292,66 +376,141 @@ struct Importer {
             }
         }
 
-        queue.waitUntilAllOperationsAreFinished()
     }
 
-    private func moveOrCopy(_ file: URL, to target: URL) -> Bool {
-        do {
-            if settings.action == .move {
-                try FileManager.default.moveItem(at: file, to: target)
-            } else {
-                try FileManager.default.copyItem(at: file, to: target)
+    private func keepBothTargets(for entries: [TransferEntry]) -> ([URL: URL], Int) {
+        let groups = Dictionary(grouping: entries, by: \.dateReferenceFile)
+        var seen = Set<URL>()
+        var reserved = Set<String>()
+        var targets: [URL: URL] = [:]
+        var duplicateCount = 0
+        // Use source order so the result is stable across imports.
+        for entry in entries where seen.insert(entry.dateReferenceFile).inserted {
+            let group = groups[entry.dateReferenceFile] ?? []
+            var suffix = 0
+            while true {
+                let candidates = group.map { member -> URL in
+                    let directory = destinationDir(type: member.type, fileURL: member.dateReferenceFile, fallback: member.fallbackDir)
+                    let base = member.file.deletingPathExtension().lastPathComponent
+                    let name = suffix == 0 ? base : "\(base)_\(suffix)"
+                    return directory.appendingPathComponent(name).appendingPathExtension(member.file.pathExtension)
+                }
+                let collisions = candidates.filter {
+                    reserved.contains($0.path.lowercased()) ||
+                    (try? FileManager.default.attributesOfItem(atPath: $0.path)) != nil
+                }.count
+                if suffix == 0 { duplicateCount += collisions }
+                if collisions == 0 {
+                    for (member, target) in zip(group, candidates) {
+                        targets[member.file] = target
+                        reserved.insert(target.path.lowercased())
+                    }
+                    break
+                }
+                suffix += 1
             }
-            return true
+        }
+        return (targets, duplicateCount)
+    }
+
+    private func moveOrCopy(_ file: URL, to target: URL) -> TransferOutcome {
+        do {
+            try validateOutput(target)
+            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        } catch { return .failure(error.localizedDescription) }
+        let writingOptions: NSFileCoordinator.WritingOptions =
+            FileManager.default.fileExists(atPath: target.path) ? .forReplacing : []
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var outcome: TransferOutcome = .failure("File coordination did not complete.")
+        if settings.action == .move {
+            coordinator.coordinate(writingItemAt: file, options: .forDeleting,
+                                   writingItemAt: target, options: writingOptions,
+                                   error: &coordinationError) { source, destination in
+                outcome = transferCoordinated(source, to: destination)
+            }
+        } else {
+            coordinator.coordinate(readingItemAt: file, options: [],
+                                   writingItemAt: target, options: writingOptions,
+                                   error: &coordinationError) { source, destination in
+                outcome = transferCoordinated(source, to: destination)
+            }
+        }
+        return coordinationError.map { .failure($0.localizedDescription) } ?? outcome
+    }
+
+    private func transferCoordinated(_ file: URL, to target: URL) -> TransferOutcome {
+        let fm = FileManager.default
+        let staging = target.deletingLastPathComponent().appendingPathComponent(".camera-transfer-" + UUID().uuidString)
+        defer { try? fm.removeItem(at: staging) }
+        do {
+            try validateOutput(target)
+            let source = file.resolvingSymlinksInPath().standardizedFileURL
+            guard source != target.resolvingSymlinksInPath().standardizedFileURL else {
+                throw importError("Source and destination refer to the same file.")
+            }
+            let attributes = try fm.attributesOfItem(atPath: file.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular else {
+                throw importError("Source is no longer a regular file.")
+            }
+            try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.copyItem(at: file, to: staging)
+            let copiedAttributes = try fm.attributesOfItem(atPath: staging.path)
+            let currentAttributes = try fm.attributesOfItem(atPath: file.path)
+            guard attributes[.size] as? NSNumber == copiedAttributes[.size] as? NSNumber,
+                  attributes[.size] as? NSNumber == currentAttributes[.size] as? NSNumber,
+                  attributes[.modificationDate] as? Date == currentAttributes[.modificationDate] as? Date else {
+                throw importError("Source changed during transfer. Original retained.")
+            }
+            // Commit on the destination filesystem; non-overwrite must never replace a late arrival.
+            try validateOutput(target)
+            if settings.duplicatePolicy == .overwrite && fm.fileExists(atPath: target.path) {
+                _ = try fm.replaceItemAt(target, withItemAt: staging, options: [.usingNewMetadataOnly])
+            } else {
+                try fm.moveItem(at: staging, to: target)
+            }
+            if settings.action == .move { try fm.removeItem(at: file) }
+            return .success
         } catch {
-            return false
+            return .failure(error.localizedDescription)
         }
     }
 
-    private func fileSignature(for file: URL) -> String? {
-        let keys: Set<URLResourceKey> = [
-            .fileSizeKey,
-            .creationDateKey,
-            .contentModificationDateKey
-        ]
-        guard let values = try? file.resourceValues(forKeys: keys) else {
-            return nil
-        }
-        guard let size = values.fileSize else {
-            return nil
-        }
-        let timestamp = values.creationDate ?? values.contentModificationDate ?? Date.distantPast
-        let epoch = Int64(timestamp.timeIntervalSince1970)
-        return "\(file.lastPathComponent.lowercased())|\(size)|\(epoch)"
+    private func importError(_ message: String) -> NSError {
+        NSError(domain: "CameraFileSortSwift.Import", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
-    private func loadManifest() -> Set<String> {
-        let url = manifestURL()
-        guard let data = try? Data(contentsOf: url) else {
-            return []
+    private func validatePaths(sources: [URL]) throws {
+        let target = settings.targetRoot.resolvingSymlinksInPath().standardizedFileURL.path
+        for sourceURL in sources {
+            let source = sourceURL.resolvingSymlinksInPath().standardizedFileURL.path
+            if source == "/" || target == source || target.hasPrefix(source + "/") || source.hasPrefix(target + "/") {
+                throw importError("Source and destination folders must not overlap.")
+            }
         }
-        if let decoded = try? JSONDecoder().decode([String].self, from: data) {
-            return Set(decoded)
-        }
-        return []
+        try validateOutput(settings.targetRoot.appendingPathComponent("placeholder"))
     }
 
-    private func saveManifest(_ signatures: Set<String>) {
-        let url = manifestURL()
-        createDirectory(url.deletingLastPathComponent())
-        let sorted = signatures.sorted()
-        if let data = try? JSONEncoder().encode(sorted) {
-            try? data.write(to: url, options: .atomic)
+    private func validateOutput(_ target: URL) throws {
+        let configured = URL(fileURLWithPath: (settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath)
+        let components = configured.pathComponents
+        if components.count > 2, components[1] == "Volumes",
+           !FileManager.default.fileExists(atPath: "/Volumes/" + components[2]) {
+            throw importError("Destination volume is not mounted.")
         }
-    }
-
-    private func manifestURL() -> URL {
-        URL(fileURLWithPath: settings.destinationRoot)
-            .appendingPathComponent(".camera_transfer_manifest.json")
-    }
-
-    private func createDirectory(_ url: URL) {
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        let base = configured
+            .resolvingSymlinksInPath().standardizedFileURL
+        let lexicalRoot = base.appendingPathComponent(settings.selectedDevice.folderName).standardizedFileURL
+        let actualRoot = lexicalRoot.resolvingSymlinksInPath().standardizedFileURL
+        guard actualRoot == lexicalRoot else { throw importError("The device folder must not be a symbolic link.") }
+        let resolved = target.resolvingSymlinksInPath().standardizedFileURL.path
+        guard resolved.hasPrefix(actualRoot.path + "/") else {
+            throw importError("Destination leaves the selected device folder.")
+        }
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: target.path),
+           attributes[.type] as? FileAttributeType != .typeRegular {
+            throw importError("Destination is not a regular file.")
+        }
     }
 
     private func mountedVolumeRoot(for source: URL) -> URL? {
@@ -369,7 +528,7 @@ struct Importer {
     }
 
     private func destinationDir(type: MediaType, fileURL: URL?, fallback: URL? = nil) -> URL {
-        let root = URL(fileURLWithPath: settings.destinationRoot)
+        let root = settings.targetRoot
         let folderName = destinationFolderName(for: type)
         if settings.dateSource == .none {
             return root.appendingPathComponent(folderName)
@@ -381,39 +540,27 @@ struct Importer {
         if let fallback {
             return fallback
         }
-        let formatter = DateFormatter()
-        formatter.dateFormat = settings.importDateFormat
-        let importDate = formatter.string(from: Date())
-        return root.appendingPathComponent(folderName).appendingPathComponent(importDate)
+        let date = formatter.withLock { $0.string(from: importDate) }
+        return root.appendingPathComponent(folderName).appendingPathComponent(date)
     }
 
     private func dateStringFor(fileURL: URL?) -> String? {
-        guard settings.useDateFolder else { return nil }
         switch settings.dateSource {
         case .importDate:
-            let formatter = DateFormatter()
-            formatter.dateFormat = normalizedDatePattern(settings.importDateFormat)
-            return formatter.string(from: Date())
+            return formatter.withLock { $0.string(from: importDate) }
         case .fileDate:
             guard let fileURL else { return nil }
             let values = try? fileURL.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-            let date = values?.creationDate ?? values?.contentModificationDate
-            guard let date else { return nil }
-            let formatter = DateFormatter()
-            formatter.dateFormat = normalizedDatePattern(settings.importDateFormat)
-            return formatter.string(from: date)
+            guard let date = values?.creationDate ?? values?.contentModificationDate else { return nil }
+            return formatter.withLock { $0.string(from: date) }
         case .none:
             return nil
         }
     }
 
-    private func normalizedDatePattern(_ pattern: String) -> String {
-        return pattern.replacingOccurrences(of: "m", with: "M")
-    }
-
-    private func progressValue(index: Int, total: Int) -> Double {
-        guard total > 0 else { return 0 }
-        return Double(index) / Double(total)
+    private func normalizedExtension(_ ext: String) -> String {
+        let trimmed = ext.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed.hasPrefix(".") ? trimmed : ".\(trimmed)"
     }
 
     private func shouldInclude(_ type: MediaType) -> Bool {
@@ -481,7 +628,7 @@ struct Importer {
         let companionVolumes = mountedVolumes.filter { volume in
             guard !selectedVolumes.contains(where: { $0.path == volume.path }) else { return false }
             guard looksLikeCameraCompanionVolume(volume) else { return false }
-            guard let metadata = metadataByPath[volume.path] else { return true }
+            guard let metadata = metadataByPath[volume.path] else { return false }
             if selectedWholeDisks.contains(metadata.wholeDiskIdentifier) {
                 return true
             }
@@ -525,6 +672,13 @@ struct Importer {
                 return nil
             }
             do {
+                for volume in volumes {
+                    try ensureVolumeIsEjectable(volume)
+                    let output = settings.targetRoot.resolvingSymlinksInPath().path
+                    if output == volume.path || output.hasPrefix(volume.path + "/") {
+                        throw importError("The destination is on this device; left mounted.")
+                    }
+                }
                 try ejectWholeDisk(identifier)
                 return nil
             } catch {
@@ -534,6 +688,8 @@ struct Importer {
             guard FileManager.default.fileExists(atPath: volume.path) else { return nil }
             do {
                 try ensureVolumeIsEjectable(volume)
+                let output = settings.targetRoot.resolvingSymlinksInPath().path
+                guard !output.hasPrefix(volume.path + "/") else { throw importError("The destination is on this device; left mounted.") }
                 try NSWorkspace.shared.unmountAndEjectDevice(at: volume)
                 return nil
             } catch {
@@ -569,16 +725,7 @@ struct Importer {
     }
 
     private func cameraGroupingKeys(from info: [String: Any]) -> Set<String> {
-        let keyNames = [
-            "BusProtocol",
-            "DeviceLocation",
-            "DeviceTreePath",
-            "IORegistryEntryName",
-            "MediaName",
-            "Protocol",
-            "RAIDMaster",
-            "SolidState"
-        ]
+        let keyNames = ["DeviceTreePath"]
         return Set(keyNames.compactMap { key in
             guard let value = info[key] else { return nil }
             if let stringValue = value as? String, !stringValue.isEmpty {
@@ -597,12 +744,15 @@ struct Importer {
         process.arguments = ["info", "-plist", volume.path]
 
         let outputPipe = Pipe()
-        let errorPipe = Pipe()
         process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
+        process.standardError = FileHandle.nullDevice
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 30, execute: timeout)
+        defer { timeout.cancel() }
+        let outputData: Data
         do {
             try process.run()
+            outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
         } catch {
             return nil
@@ -612,7 +762,6 @@ struct Importer {
             return nil
         }
 
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
         guard let plist = try? PropertyListSerialization.propertyList(from: outputData, options: [], format: nil),
               let info = plist as? [String: Any] else {
             return nil
@@ -627,13 +776,16 @@ struct Importer {
 
         let errorPipe = Pipe()
         process.standardError = errorPipe
-        process.standardOutput = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 30, execute: timeout)
+        defer { timeout.cancel() }
 
         try process.run()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
 
         guard process.terminationStatus == 0 else {
-            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
             let message = String(data: errorData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             throw NSError(domain: "CameraFileSortSwift.Eject", code: Int(process.terminationStatus), userInfo: [
@@ -668,6 +820,8 @@ struct SourceScan {
     let photoFiles: [URL]
     let videoFiles: [URL]
     let hasDuplicates: Bool
+    var errors: [String] = []
+    var companionFiles: [URL]? = nil
 }
 
 struct ProgressUpdate {
@@ -693,122 +847,74 @@ private extension URL {
 
 private struct TransferEntry {
     let file: URL
+    let dateReferenceFile: URL
     let fallbackDir: URL
     let type: MediaType
 }
 
 private enum DestinationResolution {
     case skip
-    case transfer(URL, String?)
+    case transfer(URL)
 }
 
-private struct ImportStateData {
-    var knownSignatures: Set<String>
-    var reservedSignatures: Set<String> = []
-    var reservedTargets: Set<String> = []
-    var result = TransferResult()
-    var overallCompleted = 0
-    var cardCompleted: [String: Int] = [:]
+private enum TransferOutcome {
+    case success
+    case failure(String)
 }
 
+// Transfers are deliberately serial: bounded memory and predictable writes to camera cards.
 private final class ImportState {
-    let maxConcurrentTransfers: Int
-    private let state: Locked<ImportStateData>
+    private var result = TransferResult()
+    private var overallCompleted = 0
+    private var cardCompleted: [String: Int] = [:]
 
-    init(knownSignatures: Set<String>, maxConcurrentTransfers: Int) {
-        self.maxConcurrentTransfers = maxConcurrentTransfers
-        self.state = Locked(ImportStateData(knownSignatures: knownSignatures))
-    }
-
-    func resolveDestination(
-        source: URL,
-        proposedTarget: URL,
-        signature: String?,
-        duplicatePolicy: DuplicatePolicy
-    ) -> DestinationResolution {
-        state.withLock { data in
-            let hasSignatureCollision = signature.map {
-                data.knownSignatures.contains($0) || data.reservedSignatures.contains($0)
-            } ?? false
-            let targetPath = proposedTarget.path
-            let hasTargetCollision = data.reservedTargets.contains(targetPath) || FileManager.default.fileExists(atPath: targetPath)
-            let hasDuplicate = hasSignatureCollision || hasTargetCollision
-
-            if hasDuplicate {
-                data.result.duplicates += 1
-                switch duplicatePolicy {
-                case .skip, .prompt:
-                    data.result.skipped += 1
-                    return .skip
-                case .keepBoth:
-                    let unique = uniqueDestination(for: proposedTarget, reservedTargets: data.reservedTargets)
-                    data.reservedTargets.insert(unique.path)
-                    if let signature {
-                        data.reservedSignatures.insert(signature)
-                    }
-                    return .transfer(unique, signature)
-                case .overwrite:
-                    if FileManager.default.fileExists(atPath: targetPath) {
-                        try? FileManager.default.removeItem(at: proposedTarget)
-                    }
-                    data.reservedTargets.insert(targetPath)
-                    if let signature {
-                        data.reservedSignatures.insert(signature)
-                    }
-                    return .transfer(proposedTarget, signature)
-                }
-            }
-
-            data.reservedTargets.insert(targetPath)
-            if let signature {
-                data.reservedSignatures.insert(signature)
-            }
-            return .transfer(proposedTarget, signature)
+    func resolveDestination(proposedTarget: URL, duplicatePolicy: DuplicatePolicy) -> DestinationResolution {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: proposedTarget.path)
+        guard attributes != nil else { return .transfer(proposedTarget) }
+        result.duplicates += 1
+        switch duplicatePolicy {
+        case .skip, .prompt:
+            result.skipped += 1
+            return .skip
+        case .keepBoth:
+            return .transfer(uniqueDestination(for: proposedTarget))
+        case .overwrite:
+            return .transfer(proposedTarget)
         }
     }
 
-    func finishTransfer(target: URL, signature: String?, succeeded: Bool) {
-        state.withLock { data in
-            data.reservedTargets.remove(target.path)
-            if let signature {
-                data.reservedSignatures.remove(signature)
-            }
-
-            if succeeded {
-                data.result.copied += 1
-                if let signature {
-                    data.knownSignatures.insert(signature)
-                }
-            } else {
-                data.result.skipped += 1
-            }
+    func finishTransfer(source: URL, target: URL, outcome: TransferOutcome) {
+        switch outcome {
+        case .success:
+            result.copied += 1
+        case .failure(let message):
+            result.failed += 1
+            result.transferFailures.append("\(source.lastPathComponent) -> \(target.path): \(message)")
         }
+    }
+
+    func recordDuplicates(_ count: Int) { result.duplicates += count }
+
+    func beginCard(_ name: String) { cardCompleted[name] = 0 }
+
+    func markStarted(cardName: String, fileName: String, cardTotal: Int, totalFiles: Int) -> ProgressUpdate {
+        ProgressUpdate(
+            currentCard: cardName, currentFile: fileName,
+            cardProgress: progressValue(index: cardCompleted[cardName, default: 0], total: cardTotal),
+            overallProgress: progressValue(index: overallCompleted, total: totalFiles),
+            overallIndex: overallCompleted
+        )
     }
 
     func markCompleted(cardName: String, fileName: String, cardTotal: Int, totalFiles: Int) -> ProgressUpdate {
-        state.withLock { data in
-            data.overallCompleted += 1
-            data.cardCompleted[cardName, default: 0] += 1
-            let cardIndex = data.cardCompleted[cardName, default: 0]
-            return ProgressUpdate(
-                currentCard: cardName,
-                currentFile: fileName,
-                cardProgress: progressValue(index: cardIndex, total: cardTotal),
-                overallProgress: progressValue(index: data.overallCompleted, total: totalFiles),
-                overallIndex: data.overallCompleted
-            )
-        }
+        overallCompleted += 1
+        cardCompleted[cardName, default: 0] += 1
+        return markStarted(cardName: cardName, fileName: fileName, cardTotal: cardTotal, totalFiles: totalFiles)
     }
 
-    func snapshotResult() -> TransferResult {
-        state.withLock { $0.result }
-    }
+    func snapshotResult() -> TransferResult { result }
 
-    func snapshotKnownSignatures() -> Set<String> {
-        state.withLock { $0.knownSignatures }
-    }
-
-    private func uniqueDestination(for target: URL, reservedTargets: Set<String>) -> URL {
+    private func uniqueDestination(for target: URL) -> URL {
         let base = target.deletingPathExtension().lastPathComponent
         let ext = target.pathExtension
         var counter = 1
@@ -816,16 +922,12 @@ private final class ImportState {
             let candidate = target.deletingLastPathComponent()
                 .appendingPathComponent("\(base)_\(counter)")
                 .appendingPathExtension(ext)
-            if !reservedTargets.contains(candidate.path) && !FileManager.default.fileExists(atPath: candidate.path) {
+            if (try? FileManager.default.attributesOfItem(atPath: candidate.path)) == nil {
                 return candidate
             }
             counter += 1
         }
     }
-}
-
-private func recommendedTransferConcurrency() -> Int {
-    min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 2))
 }
 
 private func progressValue(index: Int, total: Int) -> Double {

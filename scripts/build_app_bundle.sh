@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Camera Media Importer"
-APP_VERSION="1.6.0"
+APP_VERSION="1.7.0"
 LEGACY_APP_NAME="Camera Media Transfer Wizard"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/.build/release"
@@ -55,12 +55,21 @@ if [[ -f "$ICON_PATH" ]]; then
   cp "$ICON_PATH" "$APP_DIR/Contents/Resources/${ICON_NAME}.icns"
 fi
 
+# Local builds use ad-hoc signing. Set CAMERA_SIGN_IDENTITY for Developer ID distribution.
+SIGN_IDENTITY="${CAMERA_SIGN_IDENTITY:--}"
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  codesign --force --sign - --options runtime "$APP_DIR"
+else
+  codesign --force --sign "$SIGN_IDENTITY" --options runtime --timestamp "$APP_DIR"
+fi
+codesign --verify --strict "$APP_DIR"
+
 echo "Built app bundle:"
 echo "  $APP_DIR"
 
 ZIP_PATH="$ROOT_DIR/dist/${APP_NAME}.zip"
 rm -f "$ZIP_PATH"
 cd "$ROOT_DIR/dist"
-zip -r "${APP_NAME}.zip" "${APP_NAME}.app" >/dev/null
+ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$ZIP_PATH"
 echo "Built zip:"
 echo "  $ZIP_PATH"

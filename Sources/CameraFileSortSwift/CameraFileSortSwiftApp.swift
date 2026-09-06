@@ -6,7 +6,7 @@ struct CameraFileSortSwiftApp: App {
     @StateObject private var appState = AppState()
 
     var body: some Scene {
-        WindowGroup {
+        Window("Camera Media Importer", id: "importer") {
             ContentView()
                 .environmentObject(appState)
                 .frame(minWidth: 980, idealWidth: 1440, minHeight: 700, idealHeight: 840)

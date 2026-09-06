@@ -3,6 +3,8 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @State private var datePatternDraft: String = ""
+    @State private var importOptionsExpanded = false
+    @State private var managingDevices = false
 
     private let accentTint = Color(red: 0.16, green: 0.43, blue: 0.68)
     private let panelRadius: CGFloat = 8
@@ -12,8 +14,8 @@ struct ContentView: View {
         let allowed = Set("dmyDMY-_")
         let filtered = input.filter { allowed.contains($0) }
         return filtered.replacingOccurrences(of: "m", with: "M")
-            .replacingOccurrences(of: "d", with: "d")
-            .replacingOccurrences(of: "y", with: "y")
+            .replacingOccurrences(of: "D", with: "d")
+            .replacingOccurrences(of: "Y", with: "y")
     }
 
     var body: some View {
@@ -81,6 +83,9 @@ struct ContentView: View {
                 datePatternDraft = newValue
             }
         }
+        .sheet(isPresented: $managingDevices) {
+            DeviceManagementView().environmentObject(appState)
+        }
         .alert(
             item: Binding<AppAlert?>(
                 get: { appState.alert?.buttons.isEmpty == true ? appState.alert : nil },
@@ -93,36 +98,29 @@ struct ContentView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
-        .confirmationDialog(
-            appState.alert?.title ?? "",
-            isPresented: Binding<Bool>(
-                get: { appState.alert?.buttons.isEmpty == false },
-                set: { newValue in
-                    if !newValue {
+        .sheet(item: Binding<AppAlert?>(
+            get: { appState.alert?.buttons.isEmpty == false ? appState.alert : nil },
+            set: { _ in appState.alert = nil }
+        )) { alert in
+            VStack(alignment: .leading, spacing: 16) {
+                Text(alert.title).font(.title2.weight(.semibold))
+                Text(alert.message)
+                HStack {
+                    Button("Cancel") {
                         appState.alert = nil
                         appState.isImporting = false
                         appState.statusMessage = "Ready"
                     }
-                }
-            ),
-            actions: {
-                if let alert = appState.alert {
+                    Spacer()
                     ForEach(alert.buttons, id: \.title) { button in
                         Button(button.title) { alert.onSelect?(button.policy) }
                     }
-                    Button("Cancel", role: .cancel) {
-                        appState.alert = nil
-                        appState.isImporting = false
-                        appState.statusMessage = "Ready"
-                    }
-                }
-            },
-            message: {
-                if let alert = appState.alert {
-                    Text(alert.message)
                 }
             }
-        )
+            .padding(24)
+            .frame(width: 420)
+            .interactiveDismissDisabled()
+        }
     }
 }
 
@@ -163,13 +161,36 @@ private extension ContentView {
 
     var sidebar: some View {
         VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Importing from")
+                    .font(.subheadline.weight(.semibold))
+                Picker("Device", selection: $appState.settings.activeDeviceID) {
+                    ForEach(appState.settings.availableDevices) { device in
+                        Text(device.name).tag(device.id)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .disabled(appState.isImporting || appState.isScanning)
+                .onChange(of: appState.settings.activeDeviceID) { _ in appState.saveSettings() }
+                Button("Manage devices…") { managingDevices = true }
+                    .buttonStyle(.link)
+                    .disabled(appState.isImporting || appState.isScanning)
+                Text("Applies to all selected cards and folders.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
             HStack(spacing: 8) {
                 Button {
                     appState.refreshCards()
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
-                .disabled(appState.isImporting)
+                .disabled(appState.isImporting || appState.isScanning)
                 .help("Refresh mounted sources")
 
                 Button {
@@ -177,7 +198,7 @@ private extension ContentView {
                 } label: {
                     Label("Choose", systemImage: "folder.badge.plus")
                 }
-                .disabled(appState.isImporting)
+                .disabled(appState.isImporting || appState.isScanning)
                 .help("Choose a source folder or drive")
             }
             .labelStyle(.iconOnly)
@@ -189,7 +210,7 @@ private extension ContentView {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            .disabled(appState.selectedCards.isEmpty || appState.isImporting)
+            .disabled(appState.selectedCards.isEmpty || appState.isImporting || appState.isScanning)
 
             if appState.detectedCards.isEmpty {
                 emptySourcesView
@@ -282,7 +303,7 @@ private extension ContentView {
             )
         }
         .buttonStyle(.plain)
-        .disabled(appState.isImporting)
+        .disabled(appState.isImporting || appState.isScanning)
     }
 
     func sourceSubtitle(for card: URL) -> String {
@@ -305,58 +326,57 @@ private extension ContentView {
     var detailContent: some View {
         VStack(alignment: .leading, spacing: 18) {
             destinationSection
-                .disabled(appState.isImporting)
-            organizationSection
-                .disabled(appState.isImporting)
+                .disabled(appState.isImporting || appState.isScanning)
             outputPreviewSection
-            transferSettingsSection
-                .disabled(appState.isImporting)
+            DisclosureGroup("Import options", isExpanded: $importOptionsExpanded) {
+                VStack(alignment: .leading, spacing: 18) {
+                    organizationSection
+                    transferSettingsSection
+                }
+                .padding(.top, 12)
+            }
+            .disabled(appState.isImporting || appState.isScanning)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     var destinationSection: some View {
-        setupSection(title: "Destination", systemImage: "folder") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    TextField("Browse or paste a destination folder", text: $appState.settings.destinationRoot)
-                        .textFieldStyle(.roundedBorder)
-
-                    Button("Choose...") { appState.chooseDestination() }
-
-                    Button(appState.isCurrentDefaultRoot ? "Default set" : "Set default") {
-                        appState.setDefaultRoot()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(
-                        appState.isCurrentDefaultRoot ||
-                        appState.settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    )
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                sectionHeader("Import folder", systemImage: "folder")
+                Spacer()
+                Button(hasImportFolder ? "Change…" : "Choose folder…") {
+                    appState.chooseDestination()
                 }
-                .onChange(of: appState.settings.destinationRoot) { _ in
-                    appState.destinationRootDidChange()
+                .buttonStyle(.bordered)
+            }
+
+            if hasImportFolder {
+                Text(appState.settings.destinationRoot)
+                    .font(.system(.subheadline, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                if appState.destinationValid {
+                    Text("Remembered for future imports.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("Folder unavailable. Connect the drive or choose another folder.", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 }
-
-                HStack(spacing: 8) {
-                    statusBadge(
-                        title: appState.destinationValid ? "Destination OK" : "Invalid path",
-                        tint: appState.destinationValid ? .green : .red
-                    )
-                    statusBadge(
-                        title: appState.hasDefaultRoot ? "Saved default" : "No default",
-                        tint: appState.hasDefaultRoot ? accentTint : Color.secondary
-                    )
-
-                    Spacer()
-
-                    Button("Clear default") {
-                        appState.resetDestinationDefaults()
-                    }
-                    .buttonStyle(.borderless)
-                }
+            } else {
+                Text("Choose your kuva/import folder once. Device folders are created inside it.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
         }
+        .padding(.bottom, 4)
+    }
+
+    var hasImportFolder: Bool {
+        !appState.settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var organizationSection: some View {
@@ -423,9 +443,14 @@ private extension ContentView {
     }
 
     var outputPreviewSection: some View {
-        setupSection(title: "Output Preview", systemImage: "arrow.triangle.branch") {
+        setupSection(title: "Import to", systemImage: "arrow.triangle.branch") {
             VStack(alignment: .leading, spacing: 8) {
-                if appState.settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(appState.settings.selectedDevice.name)
+                    .font(.title3.weight(.semibold))
+                Text("\(appState.settings.mediaSelection.displayName) · \(appState.settings.dateSource.displayName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !hasImportFolder {
                     Text("Choose a destination folder to preview the transfer layout.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -712,15 +737,6 @@ private extension ContentView {
         }
     }
 
-    func statusBadge(title: String, tint: Color) -> some View {
-        Text(title)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(tint.opacity(0.12), in: Capsule())
-    }
-
     var statusDot: some View {
         Circle()
             .fill(statusTint)
@@ -747,9 +763,9 @@ private extension ContentView {
     }
 
     var statusHeadline: String {
-        if appState.isImporting {
-            return "Importing"
-        }
+        if appState.isImporting { return "Importing" }
+        if appState.isScanning { return "Scanning" }
+        if appState.importHadErrors { return "Needs attention" }
         if appState.processedCount > 0 && appState.processedCount == appState.totalCount {
             return "Complete"
         }
@@ -762,7 +778,7 @@ private extension ContentView {
         }
         let selected = appState.selectedCards.count
         let sourceText = selected == 1 ? "1 source selected" : "\(selected) sources selected"
-        return "\(sourceText) • \(appState.settings.mediaSelection.displayName)"
+        return "\(appState.settings.selectedDevice.name) • \(sourceText)"
     }
 
     var compactRunDetail: String {
@@ -779,6 +795,7 @@ private extension ContentView {
         if appState.isImporting {
             return accentTint
         }
+        if appState.importHadErrors { return .orange }
         if statusHeadline == "Complete" {
             return .green
         }
@@ -786,7 +803,7 @@ private extension ContentView {
     }
 
     var importButtonDisabled: Bool {
-        appState.isImporting || appState.selectedCards.isEmpty || !appState.destinationValid
+        appState.isImporting || appState.isScanning || appState.selectedCards.isEmpty || !appState.destinationValid || appState.settings.destinationConfigurationError != nil
     }
 
     var canOpenDestination: Bool {
@@ -802,6 +819,8 @@ private extension ContentView {
         if appState.selectedCards.isEmpty {
             return "Select at least one source"
         }
+        if appState.isScanning { return "Wait for the scan to finish" }
+        if let error = appState.settings.destinationConfigurationError { return error }
         if !appState.destinationValid {
             return "Choose a valid destination"
         }
@@ -833,5 +852,86 @@ private extension ContentView {
 
     func progressLabel(for value: Double) -> String {
         "\(Int((value * 100).rounded()))%"
+    }
+}
+
+private struct DeviceManagementView: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var editingID: String?
+    @State private var name = ""
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Devices").font(.title2.weight(.semibold))
+            Text("Device folders use names without spaces. Renaming affects future imports; existing folders stay where they are.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            List(appState.settings.availableDevices) { device in
+                HStack {
+                    Text(device.name)
+                    Spacer()
+                    Button("Rename") {
+                        editingID = device.id
+                        name = device.name
+                        error = nil
+                    }
+                    Button("Remove") {
+                        appState.settings.removeDevice(device.id)
+                        appState.saveSettings()
+                        if editingID == device.id { clearEditor() }
+                    }
+                    .disabled(appState.settings.availableDevices.count == 1)
+                    .help("Removes the device from this list. Media files are kept. Keep at least one device.")
+                }
+                .padding(.vertical, 4)
+            }
+            .frame(height: 220)
+
+            Text(editingID == nil ? "Add device" : "Rename device")
+                .font(.headline)
+            HStack {
+                TextField("Device name", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { saveDevice() }
+                Button(editingID == nil ? "Add" : "Save") { saveDevice() }
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if editingID != nil {
+                    Button("Cancel") { clearEditor() }
+                }
+            }
+            if let error {
+                Text(error).font(.caption).foregroundStyle(.red)
+            }
+            HStack {
+                Text("Removing a device keeps its media. Keep at least one device.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 540)
+    }
+
+    private func saveDevice() {
+        if let editingID {
+            error = appState.settings.renameDevice(editingID, to: name)
+        } else {
+            error = appState.settings.addDevice(named: name)
+        }
+        if error == nil {
+            appState.saveSettings()
+            clearEditor()
+        }
+    }
+
+    private func clearEditor() {
+        editingID = nil
+        name = ""
+        error = nil
     }
 }

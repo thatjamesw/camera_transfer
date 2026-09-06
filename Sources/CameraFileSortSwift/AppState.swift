@@ -2,11 +2,13 @@ import AppKit
 import Foundation
 import SwiftUI
 
+@MainActor
 final class AppState: ObservableObject {
     @Published var settings: AppSettings
     @Published var detectedCards: [URL] = []
     @Published var selectedCards: Set<URL> = []
     @Published var isImporting = false
+    @Published var isScanning = false
     @Published var statusMessage = "Ready"
     @Published var alert: AppAlert? = nil
     @Published var overallProgress: Double = 0
@@ -17,6 +19,7 @@ final class AppState: ObservableObject {
     @Published var lastScanSummary: String = "Not scanned"
     @Published var processedCount: Int = 0
     @Published var totalCount: Int = 0
+    @Published var importHadErrors = false
 
     private static let settingsKey = "CameraFileSortSwift.Settings"
     private static let defaultRootKey = "CameraFileSortSwift.DefaultRoot"
@@ -32,9 +35,8 @@ final class AppState: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: Self.settingsKey),
            let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
             settings = decoded
-            if settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                settings.destinationRoot = effectiveDefaultRoot(savedDefaultRoot: savedDefaultRoot)
-            }
+            migrateSavedSettings()
+            settings.destinationRoot = effectiveDefaultRoot(savedDefaultRoot: savedDefaultRoot)
         } else {
             settings = .default
             settings.destinationRoot = effectiveDefaultRoot(savedDefaultRoot: savedDefaultRoot)
@@ -53,7 +55,7 @@ final class AppState: ObservableObject {
 
     func setDefaultRoot() {
         guard !isImporting else { return }
-        let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = (settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
         guard !trimmed.isEmpty else { return }
         settings.destinationRoot = trimmed
         guard validateDestination(createIfMissing: true, allowCreatablePath: true) else {
@@ -62,6 +64,13 @@ final class AppState: ObservableObject {
         }
         UserDefaults.standard.set(trimmed, forKey: Self.defaultRootKey)
         refreshDefaultRootState()
+        saveSettings()
+    }
+
+    func useDefaultRoot() {
+        guard !isImporting else { return }
+        settings.destinationRoot = UserDefaults.standard.string(forKey: Self.defaultRootKey) ?? ""
+        destinationRootDidChange()
     }
 
     func clearDefaultRoot() {
@@ -70,13 +79,16 @@ final class AppState: ObservableObject {
     }
 
     func saveSettings() {
+        migrateSavedSettings()
         if let data = try? JSONEncoder().encode(settings) {
             UserDefaults.standard.set(data, forKey: Self.settingsKey)
         }
     }
 
     func resetDefaults() {
+        guard !isImporting else { return }
         settings = .default
+        useDefaultRoot()
         saveSettings()
     }
 
@@ -85,6 +97,8 @@ final class AppState: ObservableObject {
         let def = AppSettings.default
         clearDefaultRoot()
         settings.destinationRoot = ""
+        settings.target = nil
+        settings.useDateFolder = def.useDateFolder
         settings.importDateFormat = def.importDateFormat
         settings.destinationMode = def.destinationMode
         settings.sameFolderName = def.sameFolderName
@@ -109,16 +123,34 @@ final class AppState: ObservableObject {
     func chooseDestination() {
         guard !isImporting else { return }
         let panel = NSOpenPanel()
-        panel.title = "Choose destination folder"
+        panel.title = "Choose your import folder"
+        panel.message = "Device folders will be created inside this folder. Your choice is remembered."
+        panel.prompt = "Use folder"
+        if !settings.destinationRoot.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: settings.destinationRoot)
+        }
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
         if panel.runModal() == .OK, let url = panel.url {
-            settings.destinationRoot = url.path
-            refreshDefaultRootState()
-            destinationValid = validateDestination(allowCreatablePath: true)
+            rememberImportFolder(url)
         }
+    }
+
+    func rememberImportFolder(_ url: URL) {
+        guard !isImporting else { return }
+        let previousRoot = settings.destinationRoot
+        settings.destinationRoot = url.standardizedFileURL.path
+        guard validateDestination(allowCreatablePath: true) else {
+            settings.destinationRoot = previousRoot
+            destinationRootDidChange()
+            alert = AppAlert(title: "Folder unavailable", message: "Choose a writable import folder.")
+            return
+        }
+        UserDefaults.standard.set(settings.destinationRoot, forKey: Self.defaultRootKey)
+        refreshDefaultRootState()
+        saveSettings()
     }
 
     func chooseSource() {
@@ -146,34 +178,45 @@ final class AppState: ObservableObject {
     }
 
     func scanMediaCounts() {
-        guard !isImporting else { return }
-        let sources = Array(selectedCards)
+        guard !isImporting, !isScanning else { return }
+        let sources = selectedCards.sorted { $0.path < $1.path }
         guard !sources.isEmpty else {
             alert = AppAlert(title: "No cards selected", message: "Please select at least one card.")
             return
         }
         statusMessage = "Scanning media..."
+        isScanning = true
+        let settings = settings
         DispatchQueue.global(qos: .userInitiated).async {
-            let importer = Importer(settings: self.settings)
+            let importer = Importer(settings: settings)
             let scans = importer.scanSources(sources)
             let photoCount = scans.reduce(0) { $0 + $1.photoFiles.count }
             let videoCount = scans.reduce(0) { $0 + $1.videoFiles.count }
             let summary = "Photos: \(photoCount)  Videos: \(videoCount)"
             DispatchQueue.main.async {
-                self.lastScanSummary = summary
-                self.statusMessage = "Ready"
+                self.isScanning = false
+                let errors = scans.flatMap(\.errors)
+                self.lastScanSummary = errors.isEmpty ? summary : "Scan incomplete"
+                self.statusMessage = errors.isEmpty ? "Ready" : "Scan failed"
+                if !errors.isEmpty {
+                    self.alert = AppAlert(title: "Cannot scan all files", message: errors.prefix(6).joined(separator: "\n"))
+                }
             }
         }
     }
 
     func startImport() {
-        guard !isImporting else { return }
-        let sources = Array(selectedCards)
+        guard !isImporting, !isScanning else { return }
+        let sources = selectedCards.sorted { $0.path < $1.path }
         guard !sources.isEmpty else {
             alert = AppAlert(title: "No cards selected", message: "Please select at least one card.")
             return
         }
-        guard validateDestination(createIfMissing: true) else {
+        if let error = settings.destinationConfigurationError {
+            alert = AppAlert(title: "Invalid import settings", message: error)
+            return
+        }
+        guard validateDestination(allowCreatablePath: true) else {
             alert = AppAlert(
                 title: "Destination invalid",
                 message: "Please choose a valid destination folder."
@@ -181,7 +224,17 @@ final class AppState: ObservableObject {
             return
         }
 
+        let target = settings.targetRoot.resolvingSymlinksInPath().standardizedFileURL.path
+        guard !sources.contains(where: {
+            let source = $0.resolvingSymlinksInPath().standardizedFileURL.path
+            return target == source || target.hasPrefix(source + "/") || source.hasPrefix(target + "/")
+        }) else {
+            alert = AppAlert(title: "Overlapping folders", message: "Choose a destination outside the selected source folders.")
+            return
+        }
+        let settings = settings
         isImporting = true
+        importHadErrors = false
         statusMessage = "Scanning files..."
         overallProgress = 0
         cardProgress = 0
@@ -191,12 +244,20 @@ final class AppState: ObservableObject {
         totalCount = 0
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let importer = Importer(settings: self.settings)
+            let importer = Importer(settings: settings)
             let scans = importer.scanSources(sources)
             let duplicateFound = scans.contains { $0.hasDuplicates }
-            let totalFiles = scans.reduce(0) { $0 + $1.photoFiles.count + $1.videoFiles.count }
+            let totalFiles = importer.transferFileCount(scans: scans)
 
             DispatchQueue.main.async {
+                let errors = scans.flatMap(\.errors)
+                if !errors.isEmpty {
+                    self.isImporting = false
+                    self.importHadErrors = true
+                    self.statusMessage = "Scan failed"
+                    self.alert = AppAlert(title: "Cannot scan all files", message: errors.prefix(6).joined(separator: "\n"))
+                    return
+                }
                 if totalFiles == 0 {
                     self.isImporting = false
                     self.statusMessage = "No media found."
@@ -204,7 +265,7 @@ final class AppState: ObservableObject {
                     return
                 }
                 self.totalCount = totalFiles
-                if duplicateFound && self.settings.duplicatePolicy == .prompt {
+                if duplicateFound && settings.duplicatePolicy == .prompt {
                     self.alert = AppAlert(
                         title: "Duplicates detected",
                         message: "How should duplicates be handled?",
@@ -214,25 +275,31 @@ final class AppState: ObservableObject {
                             .init(title: "Overwrite", policy: .overwrite)
                         ],
                         onSelect: { policy in
-                            self.runImport(with: policy, scans: scans)
+                            self.alert = nil
+                            self.runImport(with: policy, scans: scans, settings: settings, importDate: importer.importDate)
                         }
                     )
                 } else {
-                    self.runImport(with: self.settings.duplicatePolicy, scans: scans)
+                    self.runImport(with: settings.duplicatePolicy, scans: scans, settings: settings, importDate: importer.importDate)
                 }
             }
         }
     }
 
-    private func runImport(with policy: DuplicatePolicy, scans: [SourceScan]) {
-        let settings = settings
+    private func runImport(with policy: DuplicatePolicy, scans: [SourceScan], settings: AppSettings, importDate: Date) {
         statusMessage = "Importing..."
 
         DispatchQueue.global(qos: .userInitiated).async {
             var mutableSettings = settings
             mutableSettings.duplicatePolicy = policy
-            let importer = Importer(settings: mutableSettings)
+            let importer = Importer(settings: mutableSettings, importDate: importDate)
+            let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated], reason: "Importing camera media")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
+            var lastProgress = Date.distantPast
             let result = importer.runImport(scans: scans) { update in
+                let now = Date()
+                guard now.timeIntervalSince(lastProgress) >= 0.1 || update.overallProgress == 1 else { return }
+                lastProgress = now
                 DispatchQueue.main.async {
                     self.currentCardName = update.currentCard
                     self.currentFileName = update.currentFile
@@ -244,16 +311,22 @@ final class AppState: ObservableObject {
 
             DispatchQueue.main.async {
                 self.isImporting = false
+                self.importHadErrors = result.failed > 0 || !result.ejectFailures.isEmpty
                 self.cardProgress = 1
                 self.overallProgress = 1
                 self.processedCount = self.totalCount
-                self.statusMessage = "Done. Copied \(result.copied), skipped \(result.skipped)."
+                let verb = settings.action == .move ? "Moved" : "Copied"
+                self.statusMessage = "Done. \(verb) \(result.copied), skipped \(result.skipped), failed \(result.failed)."
+                let transferFailureMessage = result.transferFailures.isEmpty
+                    ? ""
+                    : "\n\nTransfer failures:\n" + result.transferFailures.prefix(6).joined(separator: "\n")
+                        + (result.transferFailures.count > 6 ? "\n...and \(result.transferFailures.count - 6) more." : "")
                 let ejectFailureMessage = result.ejectFailures.isEmpty
                     ? ""
                     : "\n\nEject issues:\n" + result.ejectFailures.joined(separator: "\n")
                 self.alert = AppAlert(
-                    title: "Import complete",
-                    message: "Copied \(result.copied). Skipped \(result.skipped). Duplicates \(result.duplicates)." + ejectFailureMessage
+                    title: self.importHadErrors ? "Import finished with errors" : "Import complete",
+                    message: "\(verb) \(result.copied). Skipped \(result.skipped). Duplicates \(result.duplicates). Failed \(result.failed)." + transferFailureMessage + ejectFailureMessage
                 )
                 self.refreshCards()
             }
@@ -268,6 +341,8 @@ final class AppState: ObservableObject {
             return "FILE_DATE"
         }
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
         formatter.dateFormat = normalizedDatePattern(settings.importDateFormat)
         return formatter.string(from: Date())
     }
@@ -275,7 +350,7 @@ final class AppState: ObservableObject {
     func destinationPreview() -> String {
         let date = importDatePreview()
         let dateSuffix = date.isEmpty ? "" : "/\(date)"
-        let root = settings.destinationRoot
+        let root = settings.targetRoot.path
         switch settings.destinationMode {
         case .separate:
             return "\(root)/photo\(dateSuffix)  and  \(root)/video\(dateSuffix)"
@@ -297,31 +372,71 @@ final class AppState: ObservableObject {
 
     func openDestination() {
         guard !isImporting else { return }
-        let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = (settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
         guard !trimmed.isEmpty else { return }
         guard validateDestination(createIfMissing: true, allowCreatablePath: true) else { return }
-        let url = URL(fileURLWithPath: trimmed)
-        NSWorkspace.shared.open(url)
+        let url = settings.targetRoot
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(url)
+        } catch {
+            alert = AppAlert(title: "Cannot open destination", message: error.localizedDescription)
+        }
     }
 
     private func normalizedDatePattern(_ pattern: String) -> String {
         return pattern.replacingOccurrences(of: "m", with: "M")
     }
 
+    private func migrateSavedSettings() {
+        let defaults = AppSettings.default
+        settings.photoExtensions = mergedExtensions(settings.photoExtensions, defaults.photoExtensions)
+        settings.videoExtensions = mergedExtensions(settings.videoExtensions, defaults.videoExtensions)
+        settings.includePaths = mergedPaths(settings.includePaths, defaults.includePaths)
+    }
+
+    private func mergedExtensions(_ saved: [String], _ defaults: [String]) -> [String] {
+        mergeCaseInsensitive(saved, defaults).map { extensionName in
+            extensionName.hasPrefix(".") ? extensionName : ".\(extensionName)"
+        }
+    }
+
+    private func mergedPaths(_ saved: [String], _ defaults: [String]) -> [String] {
+        mergeCaseInsensitive(saved, defaults)
+    }
+
+    private func mergeCaseInsensitive(_ saved: [String], _ defaults: [String]) -> [String] {
+        var seen = Set<String>()
+        var merged: [String] = []
+        for value in saved + defaults {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            guard seen.insert(trimmed.lowercased()).inserted else { continue }
+            merged.append(trimmed)
+        }
+        return merged
+    }
+
     @discardableResult
     func validateDestination(createIfMissing: Bool = false, allowCreatablePath: Bool = false) -> Bool {
-        let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = (settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
         guard !trimmed.isEmpty else {
             destinationValid = false
             return false
         }
         let url = URL(fileURLWithPath: trimmed)
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-            destinationValid = true
-            return true
+        let components = url.pathComponents
+        if components.count > 2, components[1] == "Volumes",
+           !FileManager.default.fileExists(atPath: "/Volumes/" + components[2]) {
+            destinationValid = false
+            return false
         }
-        if allowCreatablePath, destinationParentExists(for: url) {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
+            destinationValid = isDir.boolValue && FileManager.default.isWritableFile(atPath: url.path)
+            return destinationValid
+        }
+        if !createIfMissing, allowCreatablePath, destinationParentExists(for: url) {
             destinationValid = true
             return true
         }
@@ -351,7 +466,7 @@ final class AppState: ObservableObject {
         while current.path != url.path {
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: current.path, isDirectory: &isDirectory) {
-                return isDirectory.boolValue
+                return isDirectory.boolValue && FileManager.default.isWritableFile(atPath: current.path)
             }
             let parent = current.deletingLastPathComponent()
             if parent.path == current.path {
@@ -365,7 +480,7 @@ final class AppState: ObservableObject {
     private func refreshDefaultRootState() {
         let savedDefaultRoot = UserDefaults.standard.string(forKey: Self.defaultRootKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmed = settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = (settings.destinationRoot.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
         hasDefaultRoot = savedDefaultRoot?.isEmpty == false
         isCurrentDefaultRoot = hasDefaultRoot && savedDefaultRoot == trimmed
     }
@@ -380,7 +495,7 @@ final class AppState: ObservableObject {
 
         workspaceObserverTokens = notifications.map { name in
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
-                self?.handleVolumeEvent(notification)
+                MainActor.assumeIsolated { self?.handleVolumeEvent(notification) }
             }
         }
     }
@@ -391,6 +506,7 @@ final class AppState: ObservableObject {
         rebuildSources(selectAll: false, autoSelectNewSources: true)
 
         guard !isImporting else { return }
+        destinationRootDidChange()
         switch notification.name {
         case NSWorkspace.didMountNotification:
             statusMessage = "Mounted \(volumeName ?? volumeURL?.lastPathComponent ?? "volume")"
@@ -403,27 +519,33 @@ final class AppState: ObservableObject {
         }
     }
 
+    private var sourceRefreshGeneration = 0
+
     private func rebuildSources(selectAll: Bool, autoSelectNewSources: Bool = false) {
-        let previousDetectedPaths = Set(detectedCards.map(\.path))
-        let previousSelectedPaths = Set(selectedCards.map(\.path))
-        let autoDetected = CameraScanner.detectCards(includePaths: settings.includePaths)
-        let merged = autoDetected + manualSources
-        var seen = Set<String>()
-        let unique = merged.filter { source in
-            seen.insert(source.path).inserted
-        }
-        manualSources = manualSources.filter { source in
-            unique.contains(where: { $0.path == source.path })
-        }
-        detectedCards = unique
-        if selectAll {
-            selectedCards = Set(unique)
-        } else {
-            let newSourcePaths = Set(unique.map(\.path)).subtracting(previousDetectedPaths)
-            selectedCards = Set(unique.filter { source in
-                previousSelectedPaths.contains(source.path) ||
-                (autoSelectNewSources && newSourcePaths.contains(source.path))
-            })
+        sourceRefreshGeneration += 1
+        let generation = sourceRefreshGeneration
+        let paths = settings.includePaths
+        let manual = manualSources
+        DispatchQueue.global(qos: .utility).async {
+            let detected = CameraScanner.detectCards(includePaths: paths)
+            let existing = manual.filter { FileManager.default.fileExists(atPath: $0.path) }
+            var seen = Set<String>()
+            let unique = (detected + existing).filter { seen.insert($0.standardizedFileURL.path).inserted }
+            DispatchQueue.main.async {
+                guard generation == self.sourceRefreshGeneration else { return }
+                let previousDetected = Set(self.detectedCards.map(\.path))
+                let previousSelected = Set(self.selectedCards.map(\.path))
+                self.manualSources = existing
+                self.detectedCards = unique
+                if selectAll {
+                    self.selectedCards = Set(unique)
+                } else {
+                    self.selectedCards = Set(unique.filter {
+                        previousSelected.contains($0.path) ||
+                        (autoSelectNewSources && !previousDetected.contains($0.path))
+                    })
+                }
+            }
         }
     }
 
