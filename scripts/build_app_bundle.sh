@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Camera Media Importer"
-APP_VERSION="1.7.0"
+APP_VERSION="2.0.0"
 LEGACY_APP_NAME="Camera Media Transfer Wizard"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/.build/release"
