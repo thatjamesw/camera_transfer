@@ -72,6 +72,8 @@ Build a standalone `.app` bundle:
 ./scripts/build_app_bundle.sh
 ```
 
+The helper uses Swift's native build system and forwards additional build arguments. To select a specific installed SDK, use `./scripts/build_app_bundle.sh --sdk /path/to/MacOSX.sdk`.
+
 Output:
 
 - `dist/Camera Media Importer.app`

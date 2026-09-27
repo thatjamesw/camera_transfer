@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Camera Media Importer"
-APP_VERSION="2.0.0"
+APP_VERSION="2.1.0"
 LEGACY_APP_NAME="Camera Media Transfer Wizard"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/.build/release"
@@ -16,7 +16,8 @@ if [[ -x "$ROOT_DIR/scripts/build_icon.sh" ]]; then
   "$ROOT_DIR/scripts/build_icon.sh"
 fi
 
-swift build -c release
+# Use the native layout expected by BUILD_DIR; allow SDK/toolchain overrides.
+swift build -c release --build-system native "$@"
 
 rm -rf "$APP_DIR"
 rm -rf "$ROOT_DIR/dist/${LEGACY_APP_NAME}.app"
