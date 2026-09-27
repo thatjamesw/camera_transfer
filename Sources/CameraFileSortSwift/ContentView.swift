@@ -9,6 +9,14 @@ struct ContentView: View {
     private let accentTint = Color(red: 0.16, green: 0.43, blue: 0.68)
     private let panelRadius: CGFloat = 8
     private let surfaceTint = Color(red: 0.95, green: 0.97, blue: 0.98)
+    private static let headerIcon: NSImage = {
+        // Use the same artwork as the Dock, including its prepared macOS mask.
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let icon = NSImage(contentsOf: url) {
+            return icon
+        }
+        return NSImage(systemSymbolName: "camera.aperture", accessibilityDescription: nil)!
+    }()
 
     private func sanitizeDatePattern(_ input: String) -> String {
         let allowed = Set("dmyDMY-_")
@@ -127,11 +135,12 @@ struct ContentView: View {
 private extension ContentView {
     var headerView: some View {
         HStack(spacing: 14) {
-            Image(systemName: "camera.aperture")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(accentTint)
-                .frame(width: 30, height: 30)
-                .background(accentTint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            Image(nsImage: Self.headerIcon)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 40, height: 40)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("Camera Media Importer")
@@ -860,22 +869,29 @@ private struct DeviceManagementView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var editingID: String?
     @State private var name = ""
+    @State private var folderName = ""
     @State private var error: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Devices").font(.title2.weight(.semibold))
-            Text("Device folders use names without spaces. Renaming affects future imports; existing folders stay where they are.")
+            Text("Choose a folder name for each device, including lowercase names. Changes apply to future imports; existing folders are not renamed or moved.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
             List(appState.settings.availableDevices) { device in
                 HStack {
-                    Text(device.name)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(device.name)
+                        Text(device.folderName + "/")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    Button("Rename") {
+                    Button("Edit") {
                         editingID = device.id
                         name = device.name
+                        folderName = device.customFolderName ?? ""
                         error = nil
                     }
                     Button("Remove") {
@@ -890,12 +906,22 @@ private struct DeviceManagementView: View {
             }
             .frame(height: 220)
 
-            Text(editingID == nil ? "Add device" : "Rename device")
+            Text(editingID == nil ? "Add device" : "Edit device")
                 .font(.headline)
-            HStack {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Device name").font(.caption).foregroundStyle(.secondary)
                 TextField("Device name", text: $name)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { saveDevice() }
+                Text("Target folder name").font(.caption).foregroundStyle(.secondary)
+                TextField("Automatic: " + ImportDevice.folderName(for: name), text: $folderName)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { saveDevice() }
+                Text("Leave blank to use the device name without spaces.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer()
                 Button(editingID == nil ? "Add" : "Save") { saveDevice() }
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if editingID != nil {
@@ -919,9 +945,9 @@ private struct DeviceManagementView: View {
 
     private func saveDevice() {
         if let editingID {
-            error = appState.settings.renameDevice(editingID, to: name)
+            error = appState.settings.renameDevice(editingID, to: name, folderName: folderName)
         } else {
-            error = appState.settings.addDevice(named: name)
+            error = appState.settings.addDevice(named: name, folderName: folderName)
         }
         if error == nil {
             appState.saveSettings()
@@ -932,6 +958,7 @@ private struct DeviceManagementView: View {
     private func clearEditor() {
         editingID = nil
         name = ""
+        folderName = ""
         error = nil
     }
 }

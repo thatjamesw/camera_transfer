@@ -17,7 +17,10 @@ mkdir -p "$TMP_DIR"
 
 PNG_1024="$TMP_DIR/icon_1024.png"
 if [[ -f "$PNG_INPUT" ]]; then
-  sips -z 1024 1024 "$PNG_INPUT" --out "$PNG_1024" >/dev/null
+  mkdir -p "$ROOT_DIR/.build/icon-tools"
+  xcrun swiftc -parse-as-library -module-cache-path "$ROOT_DIR/.build/icon-tools/module-cache" \
+    "$ROOT_DIR/scripts/prepare_icon.swift" -o "$ROOT_DIR/.build/icon-tools/prepare_icon"
+  "$ROOT_DIR/.build/icon-tools/prepare_icon" "$PNG_INPUT" "$PNG_1024"
 else
   if ! sips -s format png "$SVG" --out "$PNG_1024" >/dev/null 2>&1; then
     qlmanage -t -s 1024 -o "$TMP_DIR" "$SVG" >/dev/null 2>&1

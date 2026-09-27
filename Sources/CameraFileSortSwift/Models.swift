@@ -86,8 +86,9 @@ enum ImportTarget: String, CaseIterable, Identifiable, Codable {
 struct ImportDevice: Codable, Identifiable, Equatable {
     var id: String
     var name: String
+    var customFolderName: String? = nil
 
-    var folderName: String { Self.folderName(for: name) }
+    var folderName: String { customFolderName ?? Self.folderName(for: name) }
 
     static func folderName(for name: String) -> String {
         name.filter { !$0.isWhitespace }
@@ -112,7 +113,7 @@ struct AppSettings: Codable {
         set { selectedDeviceID = newValue }
     }
 
-    func deviceNameError(_ name: String, excluding id: String? = nil) -> String? {
+    func deviceNameError(_ name: String, folderName: String? = nil, excluding id: String? = nil) -> String? {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty { return "Enter a device name." }
         if name.hasPrefix(".") || name.contains("/") || name.contains(":") ||
@@ -120,25 +121,36 @@ struct AppSettings: Codable {
             name.utf8.count > 200 {
             return "Use a short folder name without slashes, colons, or a leading dot."
         }
-        if availableDevices.contains(where: { $0.id != id && $0.folderName.compare(ImportDevice.folderName(for: name), options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }) {
+        let folder = normalizedDeviceFolderName(folderName) ?? ImportDevice.folderName(for: name)
+        guard Self.isSafeFolderName(folder) else {
+            return "Use a short folder name without slashes, colons, or a leading dot."
+        }
+        if availableDevices.contains(where: { $0.id != id && $0.folderName.compare(folder, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }) {
             return "A device using this folder name already exists."
         }
         return nil
     }
 
-    mutating func addDevice(named name: String) -> String? {
-        if let error = deviceNameError(name) { return error }
-        let device = ImportDevice(id: UUID().uuidString, name: name.trimmingCharacters(in: .whitespacesAndNewlines))
+    private func normalizedDeviceFolderName(_ folderName: String?) -> String? {
+        guard let folder = folderName?.trimmingCharacters(in: .whitespacesAndNewlines), !folder.isEmpty else { return nil }
+        return folder
+    }
+
+    mutating func addDevice(named name: String, folderName: String? = nil) -> String? {
+        if let error = deviceNameError(name, folderName: folderName) { return error }
+        let device = ImportDevice(id: UUID().uuidString, name: name.trimmingCharacters(in: .whitespacesAndNewlines), customFolderName: normalizedDeviceFolderName(folderName))
         devices = availableDevices + [device]
         selectedDeviceID = device.id
         return nil
     }
 
-    mutating func renameDevice(_ id: String, to name: String) -> String? {
+    mutating func renameDevice(_ id: String, to name: String, folderName: String? = nil) -> String? {
         guard let index = availableDevices.firstIndex(where: { $0.id == id }) else { return "Device no longer exists." }
-        if let error = deviceNameError(name, excluding: id) { return error }
+        let folder = normalizedDeviceFolderName(folderName ?? availableDevices[index].customFolderName)
+        if let error = deviceNameError(name, folderName: folder, excluding: id) { return error }
         var updated = availableDevices
         updated[index].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated[index].customFolderName = folder
         devices = updated
         return nil
     }

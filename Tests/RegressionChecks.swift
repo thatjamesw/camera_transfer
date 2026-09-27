@@ -64,6 +64,67 @@ struct RegressionChecks {
         importer = Importer(settings: settings)
         let result = importer.runImport(scans: importer.scanSources([sources[1]]))
         precondition(result.copied == 1 && result.failed == 0)
+
+        // Leaving a card unformatted must not recopy earlier imports on a new day.
+        var daily = AppSettings.default
+        daily.destinationRoot = root.appendingPathComponent("daily-imports").path
+        daily.selectedTarget = .djiPocket4Pro
+        daily.ejectAfter = false
+        let dayA = Date(timeIntervalSince1970: 1_790_424_000)
+        let dayB = dayA.addingTimeInterval(86_400)
+        let oldClip = try write("daily-card/OLD.MP4", "old video")
+        _ = try write("daily-card/OLD.LRF", "old proxy")
+        let dailySource = [oldClip.deletingLastPathComponent()]
+        let firstDay = Importer(settings: daily, importDate: dayA)
+        precondition(firstDay.runImport(scans: firstDay.scanSources(dailySource)).copied == 2)
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.calendar = Calendar(identifier: .gregorian)
+        dateFormatter.dateFormat = daily.importDateFormat
+        let firstFolder = daily.targetRoot.appendingPathComponent("video/" + dateFormatter.string(from: dayA))
+        let secondFolder = daily.targetRoot.appendingPathComponent("video/" + dateFormatter.string(from: dayB))
+        _ = try write("daily-card/NEW.MP4", "new video")
+        var secondDay = Importer(settings: daily, importDate: dayB)
+        var dailyProgress: [Double] = []
+        let secondResult = secondDay.runImport(scans: secondDay.scanSources(dailySource)) { dailyProgress.append($0.overallProgress) }
+        precondition(secondResult.copied == 1 && secondResult.skipped == 2 && secondResult.failed == 0)
+        precondition(dailyProgress.last == 1)
+        precondition(!fm.fileExists(atPath: secondFolder.appendingPathComponent("OLD.MP4").path))
+        precondition(!fm.fileExists(atPath: secondFolder.appendingPathComponent("OLD.LRF").path))
+        precondition(fm.fileExists(atPath: secondFolder.appendingPathComponent("NEW.MP4").path))
+
+        // Prior imports are skipped under every collision policy, including move;
+        // skipping must leave the source intact.
+        try fm.removeItem(at: dailySource[0].appendingPathComponent("NEW.MP4"))
+        for policy in DuplicatePolicy.allCases {
+            daily.duplicatePolicy = policy
+            daily.action = .move
+            secondDay = Importer(settings: daily, importDate: dayB)
+            let repeated = secondDay.runImport(scans: secondDay.scanSources(dailySource))
+            precondition(repeated.skipped == 2 && repeated.copied == 0 && repeated.failed == 0)
+            precondition(fm.fileExists(atPath: oldClip.path))
+        }
+        daily.action = .copy
+        daily.duplicatePolicy = .skip
+
+        // Same filename and size do not prove equality, even with matching dates.
+        let oldDate = try fm.attributesOfItem(atPath: oldClip.path)[.modificationDate]!
+        try Data("NEW video".utf8).write(to: oldClip)
+        try fm.setAttributes([.modificationDate: oldDate], ofItemAtPath: oldClip.path)
+        secondDay = Importer(settings: daily, importDate: dayB)
+        let changed = secondDay.runImport(scans: secondDay.scanSources(dailySource))
+        precondition(changed.copied == 1 && changed.skipped == 1 && changed.failed == 0)
+        let changedContents = try String(contentsOf: secondFolder.appendingPathComponent("OLD.MP4"), encoding: .utf8)
+        precondition(changedContents == "NEW video")
+
+        // Deleted prior copies must be restored; sidecars are checked independently.
+        try fm.removeItem(at: firstFolder.appendingPathComponent("OLD.LRF"))
+        let restored = secondDay.runImport(scans: secondDay.scanSources(dailySource))
+        precondition(restored.copied == 1 && restored.skipped == 1 && restored.failed == 0)
+        daily.selectedTarget = .sonyA1II
+        let otherDevice = Importer(settings: daily, importDate: dayB)
+        precondition(otherDevice.runImport(scans: otherDevice.scanSources(dailySource)).copied == 2)
+
         // Missing sources must be an explicit failure, never a successful empty import.
         var audit = AppSettings.default
         audit.destinationRoot = root.appendingPathComponent("audit").path
@@ -157,6 +218,26 @@ struct RegressionChecks {
         precondition(managed.targetRoot.lastPathComponent == "NikonZ9")
         managed = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(managed))
         precondition(managed.selectedDevice.name == "Nikon Z9")
+        precondition(managed.renameDevice(newID, to: "Nikon Z9", folderName: "  nikon-z9  ") == nil)
+        precondition(managed.targetRoot.lastPathComponent == "nikon-z9")
+        precondition(managed.selectedDevice.name == "Nikon Z9")
+        precondition(managed.renameDevice(newID, to: "Nikon Z9 Camera") == nil)
+        precondition(managed.selectedDevice.folderName == "nikon-z9", "Display-name edits preserve custom folders")
+        precondition(managed.addDevice(named: "Another camera", folderName: "NIKON-Z9") != nil)
+        precondition(managed.renameDevice(newID, to: "Nikon Z9", folderName: "../escape") != nil)
+        precondition(managed.selectedDevice.folderName == "nikon-z9")
+        managed = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(managed))
+        precondition(managed.selectedDevice.customFolderName == "nikon-z9")
+        managed.destinationRoot = root.appendingPathComponent("custom-device-folder").path
+        managed.ejectAfter = false
+        managed.dateSource = .none
+        let customFolderImporter = Importer(settings: managed)
+        precondition(customFolderImporter.runImport(scans: customFolderImporter.scanSources([sources[1]])).copied == 1)
+        precondition(fm.fileExists(atPath: root.appendingPathComponent("custom-device-folder/nikon-z9/video/B.MP4").path))
+        precondition(managed.renameDevice(newID, to: "Nikon Z9", folderName: "") == nil)
+        precondition(managed.selectedDevice.customFolderName == nil && managed.selectedDevice.folderName == "NikonZ9")
+        let legacyDevice = try JSONDecoder().decode(ImportDevice.self, from: Data(#"{"id":"legacy","name":"Old Camera"}"#.utf8))
+        precondition(legacyDevice.folderName == "OldCamera")
         managed.removeDevice(newID)
         precondition(managed.activeDeviceID != newID)
         for device in managed.availableDevices { managed.removeDevice(device.id) }

@@ -165,6 +165,7 @@ struct Importer {
         }
 
         let importState = ImportState()
+        let previousImports = previousImportCandidates()
 
         for (scan, cardFiles) in zip(importScans, cardEntries) {
             let cardName = scan.source.lastPathComponent
@@ -172,6 +173,7 @@ struct Importer {
                 cardFiles,
                 cardName: cardName,
                 totalFiles: totalFiles,
+                previousImports: previousImports,
                 state: importState,
                 onProgress: onProgress
             )
@@ -334,6 +336,7 @@ struct Importer {
         _ entries: [TransferEntry],
         cardName: String,
         totalFiles: Int,
+        previousImports: [String: [URL]],
         state: ImportState,
         onProgress: ((ProgressUpdate) -> Void)?
     ) {
@@ -353,6 +356,17 @@ struct Importer {
                 onProgress?(startedProgress)
 
                 let actualDestDir = destinationDir(type: entry.type, fileURL: entry.dateReferenceFile, fallback: entry.fallbackDir)
+                let proposedTarget = actualDestDir.appendingPathComponent(entry.file.lastPathComponent)
+                // Same-day collisions still use the user's duplicate policy. A verified
+                // copy in another date folder needs no additional import (or source deletion).
+                if !FileManager.default.fileExists(atPath: proposedTarget.path),
+                   (previousImports[entry.file.lastPathComponent.lowercased()] ?? []).contains(where: {
+                       $0.deletingLastPathComponent() != actualDestDir && identicalContents(entry.file, $0)
+                   }) {
+                    state.recordPreviouslyImported()
+                    onProgress?(state.markCompleted(cardName: cardName, fileName: entry.file.lastPathComponent, cardTotal: entries.count, totalFiles: totalFiles))
+                    return
+                }
                 let target = keepBoth.0[entry.file] ?? actualDestDir.appendingPathComponent(entry.file.lastPathComponent)
                 let resolution = state.resolveDestination(
                     proposedTarget: target,
@@ -376,6 +390,62 @@ struct Importer {
             }
         }
 
+    }
+
+    private func previousImportCandidates() -> [String: [URL]] {
+        guard settings.dateSource == .importDate else { return [:] }
+        let fm = FileManager.default
+        var candidates: [String: [URL]] = [:]
+        let folders = Set([destinationFolderName(for: .photo), destinationFolderName(for: .video)])
+        for folder in folders {
+            let root = settings.targetRoot.appendingPathComponent(folder)
+            guard (try? root.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == false,
+                  let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { continue }
+            for case let file as URL in enumerator {
+                guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { continue }
+                if values.isSymbolicLink == true {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                guard values.isRegularFile == true, (try? validateOutput(file)) != nil else { continue }
+                candidates[file.lastPathComponent.lowercased(), default: []].append(file)
+            }
+        }
+        return candidates
+    }
+
+    private func identicalContents(_ source: URL, _ existing: URL) -> Bool {
+        // Metadata narrows candidates; only a complete, bounded-memory byte comparison
+        // proves a match. Missing, unreadable, or changing files are never skipped.
+        let fm = FileManager.default
+        do {
+            try validateOutput(existing)
+            let sourceAttributes = try fm.attributesOfItem(atPath: source.path)
+            let existingAttributes = try fm.attributesOfItem(atPath: existing.path)
+            guard sourceAttributes[.type] as? FileAttributeType == .typeRegular,
+                  existingAttributes[.type] as? FileAttributeType == .typeRegular,
+                  sourceAttributes[.size] as? NSNumber == existingAttributes[.size] as? NSNumber else { return false }
+            let input = try FileHandle(forReadingFrom: source)
+            defer { try? input.close() }
+            let previous = try FileHandle(forReadingFrom: existing)
+            defer { try? previous.close() }
+            while true {
+                let left = try input.read(upToCount: 1024 * 1024) ?? Data()
+                let right = try previous.read(upToCount: 1024 * 1024) ?? Data()
+                guard left == right else { return false }
+                if left.isEmpty { break }
+            }
+            for (file, before) in [(source, sourceAttributes), (existing, existingAttributes)] {
+                let after = try fm.attributesOfItem(atPath: file.path)
+                for key: FileAttributeKey in [.size, .modificationDate, .systemFileNumber, .systemNumber, .type] {
+                    guard let old = before[key] as? NSObject, let new = after[key] as? NSObject,
+                          old == new else { return false }
+                }
+            }
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func keepBothTargets(for entries: [TransferEntry]) -> ([URL: URL], Int) {
@@ -894,6 +964,11 @@ private final class ImportState {
     }
 
     func recordDuplicates(_ count: Int) { result.duplicates += count }
+
+    func recordPreviouslyImported() {
+        result.duplicates += 1
+        result.skipped += 1
+    }
 
     func beginCard(_ name: String) { cardCompleted[name] = 0 }
 

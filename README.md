@@ -48,8 +48,10 @@ The default window opens at a fitted native size so the controls are visible wit
 
 ## Import Behavior
 
+- In `Manage devices`, use `Edit` to set a separate target folder name (for example, display name `DJI Pocket 4 Pro` with folder `djipocket4pro`). Leave it blank for the automatic name without spaces. Changes affect future imports; existing folders are not renamed or moved. On case-insensitive disks, changing only capitalization may reuse the existing folder with its original spelling.
 - Destination folders are created automatically when needed.
 - Duplicate detection checks destination paths and filename collisions in the same pending import. Matching filename, size, or timestamp alone is not treated as proof of a previous import.
+- With `Import date`, files with matching names in other folders under the selected device's photo/video destinations are compared byte for byte. Identical existing copies are automatically skipped, including sidecars, so an unformatted card does not repeat yesterday's import. This reads the matching files and can take time for large videos. Missing or changed copies are imported again. Skipped sources remain on the card even in move mode.
 - Related sidecars are imported only when they share the same base filename as a matched photo or video file in the same folder.
 - `Skip` leaves duplicate files untouched.
 - `Keep both` writes a numbered filename such as `IMG_0001_1.JPG`.
@@ -80,6 +82,8 @@ Run filesystem regression checks through the shell helper:
 ```bash
 ./scripts/check.sh
 ```
+
+The icon build preserves the approved artwork in `assets/app_icon.png`, crops its outer transparent padding, and applies a continuous macOS mask: an 824px tile centered on a 1024px canvas. This prevents Tahoe from shrinking the icon into a grey fallback tile. Icon preparation failures stop packaging rather than silently reusing an old icon.
 
 ## Distribution Notes
 

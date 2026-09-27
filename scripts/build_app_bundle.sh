@@ -13,7 +13,7 @@ ICON_NAME="AppIcon"
 cd "$ROOT_DIR"
 
 if [[ -x "$ROOT_DIR/scripts/build_icon.sh" ]]; then
-  "$ROOT_DIR/scripts/build_icon.sh" >/dev/null 2>&1 || true
+  "$ROOT_DIR/scripts/build_icon.sh"
 fi
 
 swift build -c release
