@@ -145,9 +145,14 @@ private extension ContentView {
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Camera Media Importer")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.97, green: 0.95, blue: 0.91))
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Camera Media Importer")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.97, green: 0.95, blue: 0.91))
+                    Text((Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String).map { "v\($0)" } ?? "Development")
+                        .font(.caption)
+                        .foregroundStyle(Color(red: 0.70, green: 0.75, blue: 0.82))
+                }
                 Text(headerSubtitle)
                     .font(.caption)
                     .foregroundStyle(Color(red: 0.70, green: 0.75, blue: 0.82))

@@ -27,6 +27,8 @@ Native macOS SwiftUI app for importing camera cards and other removable media in
 
 ## Interface
 
+The app version appears beside its name in the header and comes from the bundle version set by `scripts/build_app_bundle.sh`.
+
 The app is organized around three workflow areas:
 
 - `Sources`: detected camera cards, manually chosen source folders, scan action, and source summary.
