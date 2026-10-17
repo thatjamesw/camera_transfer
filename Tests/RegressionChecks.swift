@@ -191,6 +191,45 @@ struct RegressionChecks {
         precondition(!fm.fileExists(atPath: moving.path))
         precondition(fm.fileExists(atPath: audit.targetRoot.appendingPathComponent("photo/C.JPG").path))
 
+        // Losing a source between transfers must retain every uncommitted original.
+        let interruptedCard = root.appendingPathComponent("interrupt-card")
+        _ = try write("interrupt-card/A.JPG", "first")
+        _ = try write("interrupt-card/B.JPG", "second")
+        var faultSettings = audit
+        faultSettings.destinationRoot = root.appendingPathComponent("interrupt-output").path
+        let faultImporter = Importer(settings: faultSettings)
+        let parkedCard = root.appendingPathComponent("disconnected-card")
+        var sourceRemoved = false
+        let interrupted = faultImporter.runImport(scans: faultImporter.scanSources([interruptedCard])) { update in
+            if update.overallIndex == 1 && !sourceRemoved {
+                do { try fm.moveItem(at: interruptedCard, to: parkedCard); sourceRemoved = true }
+                catch { preconditionFailure("Cannot inject source failure: \(error)") }
+            }
+        }
+        precondition(sourceRemoved && interrupted.copied == 1 && interrupted.failed == 1)
+        precondition(fm.fileExists(atPath: parkedCard.appendingPathComponent("B.JPG").path))
+        precondition(!fm.fileExists(atPath: faultSettings.targetRoot.appendingPathComponent("photo/B.JPG").path))
+
+        // Denied destination writes must preserve both move sources and old copies.
+        do {
+            faultSettings.destinationRoot = root.appendingPathComponent("denied-output").path
+            faultSettings.duplicatePolicy = .overwrite
+            let deniedTarget = faultSettings.targetRoot.appendingPathComponent("video/B.MP4")
+            try fm.createDirectory(at: deniedTarget.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("protected".utf8).write(to: deniedTarget)
+            let directory = deniedTarget.deletingLastPathComponent().path
+            try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory)
+            defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory) }
+            let deniedImporter = Importer(settings: faultSettings)
+            let denied = deniedImporter.runImport(scans: deniedImporter.scanSources([sources[1]]))
+            precondition(denied.failed == 1 && denied.copied == 0)
+            precondition(fm.fileExists(atPath: sources[1].appendingPathComponent("B.MP4").path))
+            let contents = try Data(contentsOf: deniedTarget)
+            precondition(contents == Data("protected".utf8))
+            let remaining = try fm.contentsOfDirectory(atPath: directory)
+            precondition(!remaining.contains { $0.hasPrefix(".camera-transfer-") })
+        }
+
         // Keep-both must retain the same suffix for a photo and its sidecar.
         let paired = try write("paired/D.JPG", "new photo")
         _ = try write("paired/D.XMP", "metadata")
@@ -202,6 +241,17 @@ struct RegressionChecks {
         precondition(pairedResult.copied == 2 && pairedResult.duplicates == 1)
         precondition(fm.fileExists(atPath: audit.targetRoot.appendingPathComponent("photo/D_1.JPG").path))
         precondition(fm.fileExists(atPath: audit.targetRoot.appendingPathComponent("photo/D_1.XMP").path))
+
+        // RAW + JPEG captures must share the sidecar's suffix when either collides.
+        let rawPair = try write("raw-paired/E.JPG", "jpeg")
+        _ = try write("raw-paired/E.ARW", "raw")
+        _ = try write("raw-paired/E.XMP", "shared metadata")
+        try Data("old raw".utf8).write(to: audit.targetRoot.appendingPathComponent("photo/E.ARW"))
+        let rawPairResult = auditImporter.runImport(scans: auditImporter.scanSources([rawPair.deletingLastPathComponent()]))
+        precondition(rawPairResult.copied == 3 && rawPairResult.failed == 0)
+        for ext in ["JPG", "ARW", "XMP"] {
+            precondition(fm.fileExists(atPath: audit.targetRoot.appendingPathComponent("photo/E_1." + ext).path), "RAW, JPEG and sidecar must share a suffix")
+        }
 
         var managed = AppSettings.default
         managed.selectedTarget = .djiAvata2
@@ -311,7 +361,24 @@ struct RegressionChecks {
             let copySeconds = Date().timeIntervalSince(copyStart)
             precondition(copied.copied == 2050 && copied.failed == 0)
             print(String(format: "Synthetic APFS benchmark: 2,050 files (1,000 photos, 1,000 sidecars, 50 videos); scan %.3fs; copy %.3fs.", scanSeconds, copySeconds))
+
+            // Exercise many comparison chunks without allocating the fixture in RAM.
+            let largeSource = root.appendingPathComponent("large-card")
+            try fm.createDirectory(at: largeSource, withIntermediateDirectories: true)
+            let largeFile = largeSource.appendingPathComponent("LARGE.MP4")
+            precondition(fm.createFile(atPath: largeFile.path, contents: nil))
+            let handle = try FileHandle(forWritingTo: largeFile)
+            try handle.truncate(atOffset: 512 * 1024 * 1024)
+            try handle.close()
+            benchmarkSettings.destinationRoot = root.appendingPathComponent("large-output").path
+            benchmarkSettings.dateSource = .importDate
+            let first = Importer(settings: benchmarkSettings, importDate: dayA)
+            precondition(first.runImport(scans: first.scanSources([largeSource])).copied == 1)
+            let repeated = Importer(settings: benchmarkSettings, importDate: dayB)
+            let largeResult = repeated.runImport(scans: repeated.scanSources([largeSource]))
+            precondition(largeResult.skipped == 1 && largeResult.failed == 0)
+            print("512 MiB prior-import comparison passed (measure peak memory with /usr/bin/time -l).")
         }
-        print("Passed: path containment, symlinks, missing sources, stale manifests, same-name progress, move commit, device management, saved default restoration, empty default,  all targets, multi-card scans, regular files, sidecars, manifests, skip, keep-both, overwrite, failed overwrite preservation, legacy decoding, shared/date layout.")
+        print("Passed: path containment, symlinks, missing and interrupted sources, denied writes, stale manifests, same-name progress, move commit, device management, saved default restoration, empty default, all targets, multi-card scans, regular files, sidecars, manifests, skip, keep-both, overwrite, failed overwrite preservation, legacy decoding, shared/date layout.")
     }
 }

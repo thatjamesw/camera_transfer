@@ -6,7 +6,9 @@ struct ContentView: View {
     @State private var importOptionsExpanded = false
     @State private var managingDevices = false
 
-    private let accentTint = Color(red: 0.16, green: 0.43, blue: 0.68)
+    private let accentTint = Color(red: 0.16, green: 0.36, blue: 0.60)
+    private let importTint = Color(red: 0.78, green: 0.09, blue: 0.22)
+    private let headerFill = Color(red: 0.12, green: 0.14, blue: 0.18)
     private let panelRadius: CGFloat = 8
     private let surfaceTint = Color(red: 0.95, green: 0.97, blue: 0.98)
     private static let headerIcon: NSImage = {
@@ -145,9 +147,10 @@ private extension ContentView {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Camera Media Importer")
                     .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color(red: 0.97, green: 0.95, blue: 0.91))
                 Text(headerSubtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color(red: 0.70, green: 0.75, blue: 0.82))
                     .lineLimit(1)
             }
 
@@ -160,12 +163,13 @@ private extension ContentView {
                 Label(appState.isImporting ? "Importing" : "Import", systemImage: "arrow.down.doc.fill")
             }
             .buttonStyle(.borderedProminent)
+            .tint(importTint)
             .disabled(importButtonDisabled)
             .help(importDisabledReason)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
-        .background(.bar)
+        .background(headerFill)
     }
 
     var sidebar: some View {
@@ -588,6 +592,7 @@ private extension ContentView {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+            .tint(importTint)
             .controlSize(.large)
             .disabled(importButtonDisabled)
             .help(importDisabledReason)
@@ -644,6 +649,7 @@ private extension ContentView {
                 Label(appState.isImporting ? "Importing" : "Import", systemImage: "arrow.down.doc.fill")
             }
             .buttonStyle(.borderedProminent)
+            .tint(importTint)
             .disabled(importButtonDisabled)
             .help(importDisabledReason)
         }
@@ -774,6 +780,7 @@ private extension ContentView {
     var statusHeadline: String {
         if appState.isImporting { return "Importing" }
         if appState.isScanning { return "Scanning" }
+        if appState.statusMessage == "Scan failed" { return "Scan failed" }
         if appState.importHadErrors { return "Needs attention" }
         if appState.processedCount > 0 && appState.processedCount == appState.totalCount {
             return "Complete"
@@ -804,7 +811,7 @@ private extension ContentView {
         if appState.isImporting {
             return accentTint
         }
-        if appState.importHadErrors { return .orange }
+        if appState.importHadErrors || appState.statusMessage == "Scan failed" { return .orange }
         if statusHeadline == "Complete" {
             return .green
         }

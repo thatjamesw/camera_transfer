@@ -430,10 +430,14 @@ struct Importer {
             let previous = try FileHandle(forReadingFrom: existing)
             defer { try? previous.close() }
             while true {
-                let left = try input.read(upToCount: 1024 * 1024) ?? Data()
-                let right = try previous.read(upToCount: 1024 * 1024) ?? Data()
-                guard left == right else { return false }
-                if left.isEmpty { break }
+                // FileHandle's autoreleased buffers must not accumulate across a video.
+                let (matches, finished) = try autoreleasepool {
+                    let left = try input.read(upToCount: 1024 * 1024) ?? Data()
+                    let right = try previous.read(upToCount: 1024 * 1024) ?? Data()
+                    return (left == right, left.isEmpty)
+                }
+                guard matches else { return false }
+                if finished { break }
             }
             for (file, before) in [(source, sourceAttributes), (existing, existingAttributes)] {
                 let after = try fm.attributesOfItem(atPath: file.path)
@@ -449,14 +453,14 @@ struct Importer {
     }
 
     private func keepBothTargets(for entries: [TransferEntry]) -> ([URL: URL], Int) {
-        let groups = Dictionary(grouping: entries, by: \.dateReferenceFile)
+        let groups = Dictionary(grouping: entries, by: { $0.dateReferenceFile.deletingPathExtension() })
         var seen = Set<URL>()
         var reserved = Set<String>()
         var targets: [URL: URL] = [:]
         var duplicateCount = 0
         // Use source order so the result is stable across imports.
-        for entry in entries where seen.insert(entry.dateReferenceFile).inserted {
-            let group = groups[entry.dateReferenceFile] ?? []
+        for entry in entries where seen.insert(entry.dateReferenceFile.deletingPathExtension()).inserted {
+            let group = groups[entry.dateReferenceFile.deletingPathExtension()] ?? []
             var suffix = 0
             while true {
                 let candidates = group.map { member -> URL in

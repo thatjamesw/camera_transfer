@@ -85,7 +85,7 @@ Run filesystem regression checks through the shell helper:
 ./scripts/check.sh
 ```
 
-The icon build preserves the approved artwork in `assets/app_icon.png`, crops its outer transparent padding, and applies a continuous macOS mask: an 824px tile centered on a 1024px canvas. This prevents Tahoe from shrinking the icon into a grey fallback tile. Icon preparation failures stop packaging rather than silently reusing an old icon.
+The bundle build reuses the approved `assets/AppIcon.icns`. If it is missing, the icon build prepares it from `assets/app_icon.png` with an 824px tile centered on a 1024px canvas. Icon preparation failures stop packaging.
 
 ## Distribution Notes
 

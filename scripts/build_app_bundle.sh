@@ -12,7 +12,7 @@ ICON_NAME="AppIcon"
 
 cd "$ROOT_DIR"
 
-if [[ -x "$ROOT_DIR/scripts/build_icon.sh" ]]; then
+if [[ ! -f "$ICON_PATH" && -x "$ROOT_DIR/scripts/build_icon.sh" ]]; then
   "$ROOT_DIR/scripts/build_icon.sh"
 fi
 
