@@ -165,7 +165,7 @@ struct Importer {
         }
 
         let importState = ImportState()
-        let previousImports = previousImportCandidates()
+        let previousImports = previousImportCandidates(matching: Set(cardEntries.joined().map { $0.file.lastPathComponent.lowercased() }))
 
         for (scan, cardFiles) in zip(importScans, cardEntries) {
             let cardName = scan.source.lastPathComponent
@@ -392,7 +392,7 @@ struct Importer {
 
     }
 
-    private func previousImportCandidates() -> [String: [URL]] {
+    private func previousImportCandidates(matching filenames: Set<String>) -> [String: [URL]] {
         guard settings.dateSource == .importDate else { return [:] }
         let fm = FileManager.default
         var candidates: [String: [URL]] = [:]
@@ -407,7 +407,8 @@ struct Importer {
                     enumerator.skipDescendants()
                     continue
                 }
-                guard values.isRegularFile == true, (try? validateOutput(file)) != nil else { continue }
+                guard values.isRegularFile == true, filenames.contains(file.lastPathComponent.lowercased()),
+                      (try? validateOutput(file)) != nil else { continue }
                 candidates[file.lastPathComponent.lowercased(), default: []].append(file)
             }
         }

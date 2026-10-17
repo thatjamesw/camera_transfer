@@ -125,6 +125,19 @@ struct RegressionChecks {
         let otherDevice = Importer(settings: daily, importDate: dayB)
         precondition(otherDevice.runImport(scans: otherDevice.scanSources(dailySource)).copied == 2)
 
+        // Archive filtering must match case-insensitively and include sidecars.
+        var filteredSettings = AppSettings.default
+        filteredSettings.destinationRoot = root.appendingPathComponent("filtered-output").path
+        filteredSettings.ejectAfter = false
+        let filteredSource = try write("filtered-card/CAPTURE.ARW", "raw bytes")
+        _ = try write("filtered-card/CAPTURE.XMP", "metadata")
+        _ = try write("filtered-output/Misc/photo/older/capture.arw", "raw bytes")
+        _ = try write("filtered-output/Misc/photo/older/capture.xmp", "metadata")
+        _ = try write("filtered-output/Misc/photo/older/UNRELATED.ARW", "unrelated")
+        let filteredImporter = Importer(settings: filteredSettings, importDate: dayB)
+        let filteredResult = filteredImporter.runImport(scans: filteredImporter.scanSources([filteredSource.deletingLastPathComponent()]))
+        precondition(filteredResult.skipped == 2 && filteredResult.copied == 0 && filteredResult.failed == 0)
+
         // Missing sources must be an explicit failure, never a successful empty import.
         var audit = AppSettings.default
         audit.destinationRoot = root.appendingPathComponent("audit").path
