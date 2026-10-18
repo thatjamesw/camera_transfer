@@ -5,6 +5,7 @@ struct ContentView: View {
     @State private var datePatternDraft: String = ""
     @State private var importOptionsExpanded = false
     @State private var managingDevices = false
+    @State private var showingImportReport = false
 
     private let accentTint = Color(red: 0.16, green: 0.36, blue: 0.60)
     private let importTint = Color(red: 0.78, green: 0.09, blue: 0.22)
@@ -96,6 +97,30 @@ struct ContentView: View {
         .sheet(isPresented: $managingDevices) {
             DeviceManagementView().environmentObject(appState)
         }
+        .sheet(isPresented: $showingImportReport) {
+            if let report = appState.lastImportReport {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Last import report").font(.title2.weight(.semibold))
+                    ScrollView {
+                        Text(report)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    HStack {
+                        Button("Copy report") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(report, forType: .string)
+                        }
+                        Spacer()
+                        Button("Done") { showingImportReport = false }
+                            .keyboardShortcut(.cancelAction)
+                    }
+                }
+                .padding(24)
+                .frame(width: 640, height: 440)
+            }
+        }
         .alert(
             item: Binding<AppAlert?>(
                 get: { appState.alert?.buttons.isEmpty == true ? appState.alert : nil },
@@ -160,6 +185,12 @@ private extension ContentView {
             }
 
             Spacer()
+
+            if appState.lastImportReport != nil {
+                Button("Last import report") { showingImportReport = true }
+                    .disabled(appState.isImporting || appState.isScanning)
+                    .help("View or copy the complete report from this app session")
+            }
 
             Button {
                 appState.saveSettings()

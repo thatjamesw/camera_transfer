@@ -964,7 +964,7 @@ private final class ImportState {
             result.copied += 1
         case .failure(let message):
             result.failed += 1
-            result.transferFailures.append("\(source.lastPathComponent) -> \(target.path): \(message)")
+            result.transferFailures.append("\(source.path) -> \(target.path): \(message)")
         }
     }
 

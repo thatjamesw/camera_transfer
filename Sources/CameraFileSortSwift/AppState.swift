@@ -20,6 +20,7 @@ final class AppState: ObservableObject {
     @Published var processedCount: Int = 0
     @Published var totalCount: Int = 0
     @Published var importHadErrors = false
+    @Published var lastImportReport: String? = nil
 
     private static let settingsKey = "CameraFileSortSwift.Settings"
     private static let defaultRootKey = "CameraFileSortSwift.DefaultRoot"
@@ -255,6 +256,7 @@ final class AppState: ObservableObject {
                     self.isImporting = false
                     self.importHadErrors = true
                     self.statusMessage = "Scan failed"
+                    self.lastImportReport = TransferResult(failed: errors.count, transferFailures: errors).report(action: settings.action)
                     self.alert = AppAlert(title: "Cannot scan all files", message: errors.prefix(6).joined(separator: "\n"))
                     return
                 }
@@ -312,6 +314,7 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async {
                 self.isImporting = false
                 self.importHadErrors = result.failed > 0 || !result.ejectFailures.isEmpty
+                self.lastImportReport = "Destination: \(settings.targetRoot.path)\n\n" + result.report(action: settings.action)
                 self.cardProgress = 1
                 self.overallProgress = 1
                 self.processedCount = self.totalCount

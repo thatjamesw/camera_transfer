@@ -259,4 +259,16 @@ struct TransferResult {
     var failed: Int = 0
     var transferFailures: [String] = []
     var ejectFailures: [String] = []
+
+    func report(action: TransferAction) -> String {
+        let verb = action == .move ? "Moved" : "Copied"
+        var sections = ["\(verb) \(copied). Skipped \(skipped). Duplicates \(duplicates). Failed \(failed)."]
+        if !transferFailures.isEmpty {
+            sections.append("Transfer failures:\n" + transferFailures.joined(separator: "\n"))
+        }
+        if !ejectFailures.isEmpty {
+            sections.append("Eject issues:\n" + ejectFailures.joined(separator: "\n"))
+        }
+        return sections.joined(separator: "\n\n")
+    }
 }

@@ -29,6 +29,8 @@ Native macOS SwiftUI app for importing camera cards and other removable media in
 
 The app version appears beside its name in the header and comes from the bundle version set by `scripts/build_app_bundle.sh`.
 
+After an import, **Last import report** in the header shows the full result, including every failed source/destination path and eject issue. Use **Copy report** to copy the complete text. The latest report remains available after dismissing the completion dialog, until the app quits or another import finishes. Import scan failures also retain their complete error list.
+
 The app is organized around three workflow areas:
 
 - `Sources`: detected camera cards, manually chosen source folders, scan action, and source summary.
@@ -86,6 +88,16 @@ Run filesystem regression checks through the shell helper:
 ```bash
 ./scripts/check.sh
 ```
+
+Verify a built app and ZIP, optionally checking the intended release tag:
+
+```bash
+python3 scripts/verify_app_bundle.py
+python3 scripts/verify_app_bundle.py v2.1.2
+python3 -m unittest discover -s Tests -p 'test_*.py'
+```
+
+GitHub Actions runs regression/performance checks, the shell bundle build, and package verification on pushes to `main`, pull requests, version tags, or manual dispatch. It uses macOS 15 with Xcode 16.4. Tagged builds must match the bundled version. The workflow checks signatures and verifies that the ZIP contains the same version and executable as the built app; it does not publish releases or perform notarization.
 
 The bundle build reuses the approved `assets/AppIcon.icns`. If it is missing, the icon build prepares it from `assets/app_icon.png` with an 824px tile centered on a 1024px canvas. Icon preparation failures stop packaging.
 

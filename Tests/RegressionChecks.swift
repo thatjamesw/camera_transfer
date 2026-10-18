@@ -51,6 +51,7 @@ struct RegressionChecks {
         try fm.removeItem(at: photo)
         let failed = importer.runImport(scans: stale)
         precondition(failed.failed == 1)
+        precondition(failed.transferFailures.contains { $0.contains(photo.path) }, "Reports must identify the full failed source path")
         let preserved = try String(contentsOf: destination, encoding: .utf8)
         precondition(preserved == "replacement", "Failed overwrite must preserve existing file")
         let encoded = try JSONEncoder().encode(AppSettings.default)
@@ -348,6 +349,27 @@ struct RegressionChecks {
         }
         precondition(!promptState.isImporting && !promptState.importHadErrors)
         precondition(promptState.processedCount == promptState.totalCount)
+        let completedReport = promptState.lastImportReport
+        precondition(completedReport?.contains("Destination: ") == true)
+        promptState.alert = nil
+        precondition(promptState.lastImportReport == completedReport, "Dismissing completion must retain the report")
+
+        let reportFailures = (1...10).map { "/card/failed-\($0).ARW -> /output/failed-\($0).ARW: denied" }
+        let report = TransferResult(copied: 2, skipped: 3, duplicates: 3, failed: 10,
+                                    transferFailures: reportFailures, ejectFailures: ["CARD: busy"]).report(action: .move)
+        precondition(report.contains("Moved 2. Skipped 3. Duplicates 3. Failed 10."))
+        precondition(reportFailures.allSatisfy { report.contains($0) }, "The report must include failures beyond the dialog's six-file limit")
+        precondition(report.contains("Eject issues:\nCARD: busy"))
+
+        let unreadableSources = (1...8).map { root.appendingPathComponent("unreadable-\($0)") }
+        promptState.selectedCards = Set(unreadableSources)
+        promptState.startImport()
+        for _ in 0..<200 {
+            if !promptState.isImporting { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        precondition(!promptState.isImporting && promptState.importHadErrors)
+        precondition(unreadableSources.allSatisfy { promptState.lastImportReport?.contains($0.path) == true })
 
         if CommandLine.arguments.contains("--performance") {
             let benchmarkSource = root.appendingPathComponent("benchmark/source")
